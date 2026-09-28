@@ -1,0 +1,122 @@
+# CI：让 `npm test` 成为真实防线，而不是「全绿」的错觉。
+#
+# 本仓库零运行时依赖，测试用 Node 内置的 `node:test`，所以这里没有 `npm ci`。
+# 唯一的外部输入是**宿主主题包**：`test/appearance.test.js` 要从全局安装里读它的
+# `lib/client.js`（只当文本读，不 require），用来核对 token 存在性、色阶与对比度。
+#
+# 关键陷阱（这个 workflow 存在的理由）：主题包读不到时，appearance 的 16 条用例会
+# `t.skip()` 而不是失败——`npm test` 依旧退出 0，CI 一片绿，但那 16 条**什么都没验证**。
+# 所以下面那道「skipped 必须为 0」的闸门不是可选项，它是本文件的核心价值。
+
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Node ${{ matrix.node }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # engines 要求 >=22；22 与 24 都跑，覆盖宿主 zstd 能力的两个代际。
+        node: ["22", "24"]
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Node ${{ matrix.node }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+
+      # 只装主题包（5 个包），不装完整的 @deepseek-ai/dsh（520 个包，还带原生依赖）：
+      # 测试只需要主题包的 lib/client.js 文本。--ignore-scripts 跳过 node-pty 之类的
+      # 原生构建，让这一步稳定在秒级。
+      #
+      # 装完之后主题包落在 `<node 前缀>/lib/node_modules/@deepseek-ai/dsh-client-ui-theme/
+      # lib/client.js`（扁平布局），正是测试候选列表里的第 3 条，测试自己也能反推出来。
+      # 但这里仍然用 UL_THEME_PATH 显式指路：CI 的 Node 前缀由 setup-node 决定，
+      # 与其依赖「反推一定对」，不如把路径算出来钉死——显式指路同时让「路径解析失败」
+      # 在 CI 里不可能发生，闸门要拦的就只剩「主题包真的没装上」这一种真实情况。
+      - name: 全局安装宿主主题包（钉死版本）
+        run: |
+          npm i -g --ignore-scripts @deepseek-ai/dsh-client-ui-theme@0.1.7-rc.2
+          THEME="$(npm root -g)/@deepseek-ai/dsh-client-ui-theme/lib/client.js"
+          if [ ! -f "$THEME" ]; then
+            echo "::error::主题包装完后在 $THEME 找不到 client.js：下面的外观断言会全部 skip。"
+            exit 1
+          fi
+          echo "UL_THEME_PATH=$THEME" >> "$GITHUB_ENV"
+          echo "主题包已就位：$THEME"
+
+      # 用 NODE_OPTIONS 追加一个 TAP reporter，把同一批用例额外导出一份机器可读的报告；
+      # 不修改 package.json 里的 test 脚本。注意 reporter 参数必须排在测试文件通配符
+      # **之前**（`npm test -- --test-reporter=...` 会把它追加到末尾，Node 那时已不再解析），
+      # 所以走环境变量而不是 `--` 透传。
+      # stdout 仍保留 spec reporter，失败时日志照样可读。
+      - name: 跑测试（并导出 TAP 报告）
+        run: |
+          NODE_OPTIONS="--test-reporter=spec --test-reporter-destination=stdout --test-reporter=tap --test-reporter-destination=$RUNNER_TEMP/test-results.tap" npm test
+
+      # 闸门：skipped 必须为 0。
+      #
+      # 主题包缺失时 npm test 会**成功退出**，只是把 16 条外观断言记成 skipped——
+      # 这正是「虚假安全感」。这里把 TAP 汇总行读出来，只要 skipped != 0 就失败，
+      # 并把被跳过的用例与原因原样打印出来。
+      # 同时要求报告存在、有 `# tests` / `# skipped` 汇总行、且用例数不为 0：
+      # 否则「报告没生成」也会被当成 skipped==0 而假绿。
+      - name: 闸门：skipped 必须为 0（否则 CI 失败）
+        if: always()
+        run: |
+          REPORT="$RUNNER_TEMP/test-results.tap"
+
+          if [ ! -s "$REPORT" ]; then
+            echo "::error::没有拿到 TAP 报告（$REPORT）：测试可能根本没跑起来，无法证明 skipped==0。"
+            exit 1
+          fi
+
+          # TAP 汇总行长这样：`# tests 94` / `# skipped 0`。取最后一条（存在多份时以最终汇总为准）。
+          summary() {
+            sed -n "s/^# $1 \([0-9][0-9]*\)\$/\1/p" "$REPORT" | tail -1
+          }
+
+          TESTS="$(summary tests)"
+          SKIPPED="$(summary skipped)"
+          FAILED="$(summary fail)"
+
+          if [ -z "$TESTS" ] || [ -z "$SKIPPED" ] || [ -z "$FAILED" ]; then
+            echo "::error::TAP 报告里找不到 \`# tests\` / \`# skipped\` / \`# fail\` 汇总行：报告格式变了，闸门无法判定，按失败处理。"
+            sed -n '1,40p' "$REPORT"
+            exit 1
+          fi
+
+          if [ "$TESTS" -eq 0 ]; then
+            echo "::error::TAP 报告显示 0 个用例被执行：此时 skipped==0 毫无意义，按失败处理。"
+            exit 1
+          fi
+
+          if [ "$SKIPPED" -ne 0 ]; then
+            echo "::error::$SKIPPED 个用例被 skipped（共 $TESTS 个，失败 $FAILED 个）：外观回归正在静默退化，CI 不能算通过。"
+            echo "--- 被跳过的用例 ---"
+            grep '# SKIP' "$REPORT" | sed 's/^ok [0-9]* - //'
+            echo "--- 最常见的原因：宿主主题包没装上，或装在了测试找不到的路径。"
+            echo "--- 请检查上面的安装步骤，必要时用 UL_THEME_PATH 显式指路。"
+            exit 1
+          fi
+
+          if [ "$FAILED" -ne 0 ]; then
+            # 有失败用例时 `npm test` 那一步已经让 job 失败了；这里再显式失败一次，
+            # 是为了让这道闸门的结论自洽——「skipped==0」不该以绿字收尾，
+            # 也不该因为将来有人给测试步骤加上 continue-on-error 就漏掉真失败。
+            echo "::error::skipped == 0，但有 $FAILED 个用例失败（共 $TESTS 个）：见上一步日志。"
+            exit 1
+          fi
+
+          echo "skipped == 0：$TESTS 个用例全部真实执行，0 失败，0 跳过。"

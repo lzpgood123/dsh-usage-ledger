@@ -35,35 +35,59 @@ import { dirname, join } from "node:path";
 const CLIENT_URL = new URL("../src/client.js", import.meta.url);
 
 /**
- * 宿主主题包的绝对路径。
+ * 宿主主题包的候选绝对路径，按优先级排列。
  *
  * 这个路径是**机器相关**的：宿主主题包由全局安装的 DSH 提供，不在本仓库的依赖里。
  * 它必须与运行测试的 Node 可执行文件同源，所以从 `process.execPath` 反推，而不是
  * 写死 `/home/...`（写死会让换机器的 CI 直接读不到文件）。
  *
- * 若它不存在，token 存在性断言必须 `t.skip()` 并说明原因，**绝不**让它假装通过：
+ * 之所以是**候选列表**而不是一条路径：全局装的是哪个包决定主题包落在哪里。
+ * - 装完整的 `@deepseek-ai/dsh` → 主题包是它自己的依赖，落在**嵌套**目录；
+ * - 只装 `@deepseek-ai/dsh-client-ui-theme` → 落在**扁平**目录。
+ * 两种都是合法的宿主安装，只认其中一种会让另一种布局下的 16 条外观断言静默 skip。
+ *
+ * 若候选**全部**不存在，token 存在性断言必须 `t.skip()` 并说明原因，**绝不**让它假装通过：
  * 「读不到宿主 token 定义」与「token 都存在」是两回事，后者才是安全的。
  */
-const THEME_PATH = join(
-	dirname(process.execPath),
-	"..",
-	"lib",
-	"node_modules",
-	"@deepseek-ai",
-	"dsh",
-	"node_modules",
-	"@deepseek-ai",
-	"dsh-client-ui-theme",
-	"lib",
-	"client.js",
-);
+const THEME_CANDIDATES = [
+	// 1. 显式覆盖：CI（只装主题包）与非常规安装布局用它指路，优先级最高。
+	process.env.UL_THEME_PATH,
+	// 2. 嵌套：全局装了完整的 DSH，主题包在 dsh 自己的 node_modules 里。
+	join(
+		dirname(process.execPath),
+		"..",
+		"lib",
+		"node_modules",
+		"@deepseek-ai",
+		"dsh",
+		"node_modules",
+		"@deepseek-ai",
+		"dsh-client-ui-theme",
+		"lib",
+		"client.js",
+	),
+	// 3. 扁平：只单独全局装了主题包（5 个包，比装完整 DSH 轻得多）。
+	join(
+		dirname(process.execPath),
+		"..",
+		"lib",
+		"node_modules",
+		"@deepseek-ai",
+		"dsh-client-ui-theme",
+		"lib",
+		"client.js",
+	),
+].filter((candidate) => typeof candidate === "string" && candidate.length > 0);
+
+/** 第一个真实存在的候选路径；一个都没有时为 `null`。 */
+const THEME_PATH = THEME_CANDIDATES.find((candidate) => existsSync(candidate)) ?? null;
 
 /**
  * 本机是否装有宿主主题包。
  *
  * 提前算出来，好让每个用例自己决定是断言还是 skip——两条路径都必须是**显式**的。
  */
-const THEME_PRESENT = existsSync(THEME_PATH);
+const THEME_PRESENT = THEME_PATH !== null;
 
 /** 源码与主题包都只读一次。 */
 let cachedSource;
@@ -366,7 +390,7 @@ function themeMaps(theme) {
  */
 function skipMissingTheme(t) {
 	t.skip(
-		`读不到宿主主题包：${THEME_PATH}\n` +
+		`读不到宿主主题包，已试过的路径：\n${THEME_CANDIDATES.map((candidate) => `  - ${candidate}`).join("\n")}\n` +
 			"本机没有全局安装 DSH 主题包（或 Node 版本目录不同），token 存在性**未被验证**。" +
 			"这条用例被记为 skipped 而不是 passed，请勿把它当成「token 都存在」——" +
 			"面板引用不存在的 token 时 var() 会静默落到 fallback，浅色模式下文字不可读。",
