@@ -61,9 +61,21 @@ jobs:
       # **之前**（`npm test -- --test-reporter=...` 会把它追加到末尾，Node 那时已不再解析），
       # 所以走环境变量而不是 `--` 透传。
       # stdout 仍保留 spec reporter，失败时日志照样可读。
+      # 显式列出测试文件，**排除** test/viewport.test.js。
+      #
+      # 那个文件要驱动真实 Chrome，在拿不到浏览器的环境里只能 skip；而本 job 下面
+      # 那道「skipped 必须为 0」的闸门会因此把整个 job 判红——用「环境缺失」去否决
+      # 一批本来能跑的用例，是错的。浏览器用例有自己的 job（`viewport`），
+      # 那里 Chrome 缺失才算失败。
+      #
+      # 为什么不用 `node --test "test/**/*.test.js" "!test/viewport.test.js"`：
+      # 已实测 Node 24 **不支持** glob 否定，那个 `!...` 参数被静默忽略，104 个用例
+      # 照跑不误（含 viewport），闸门于是仍会被误杀。所以这里用 shell 算出显式列表。
       - name: 跑测试（并导出 TAP 报告）
         run: |
-          NODE_OPTIONS="--test-reporter=spec --test-reporter-destination=stdout --test-reporter=tap --test-reporter-destination=$RUNNER_TEMP/test-results.tap" npm test
+          FILES="$(ls test/*.test.js | grep -v 'test/viewport.test.js$' | tr '\n' ' ')"
+          echo "本次执行的测试文件：$FILES"
+          NODE_OPTIONS="--test-reporter=spec --test-reporter-destination=stdout --test-reporter=tap --test-reporter-destination=$RUNNER_TEMP/test-results.tap" node --test $FILES
 
       # 闸门：skipped 必须为 0。
       #
@@ -120,3 +132,80 @@ jobs:
           fi
 
           echo "skipped == 0：$TESTS 个用例全部真实执行，0 失败，0 跳过。"
+
+  # 浏览器布局 job：与主 job 分开，理由见主 job 里那段注释。
+  #
+  # 这里反过来——**Chrome 起不来就是失败**，不能 skip。这个 job 存在的唯一意义
+  # 就是量真实几何（面板是否被切出视口），量不到就等于没验证，所以断言
+  # skipped === 0 并把 skipped 当成错误。
+  viewport:
+    name: 浏览器视口
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      # ubuntu-latest 自带 google-chrome，无需额外安装。测试自己按
+      # CHROME_BIN / CHROME_PATH / 常见绝对路径 / PATH 的顺序探测。
+      - name: 确认 Chrome 可用（起不来就早失败，别等到 skip 被闸门抓到）
+        run: |
+          CHROME="$(command -v google-chrome || command -v google-chrome-stable || true)"
+          if [ -z "$CHROME" ]; then
+            echo "::error::runner 上没有 google-chrome：视口断言将全部 skip，本 job 失去意义。"
+            exit 1
+          fi
+          echo "CHROME_BIN=$CHROME" >> "$GITHUB_ENV"
+          "$CHROME" --version
+
+      - name: 跑视口测试（并导出 TAP 报告）
+        run: |
+          NODE_OPTIONS="--test-reporter=spec --test-reporter-destination=stdout --test-reporter=tap --test-reporter-destination=$RUNNER_TEMP/viewport-results.tap" \
+            node --test test/viewport.test.js
+
+      # 闸门：这个 job 里 skipped 必须为 0 —— 与主 job 相反，这里 skip 是缺陷。
+      - name: 闸门：视口用例一个都不许 skip
+        if: always()
+        run: |
+          REPORT="$RUNNER_TEMP/viewport-results.tap"
+
+          if [ ! -s "$REPORT" ]; then
+            echo "::error::没有拿到 TAP 报告（$REPORT）：视口测试没跑起来。"
+            exit 1
+          fi
+
+          summary() {
+            sed -n "s/^# $1 \([0-9][0-9]*\)\$/\1/p" "$REPORT" | tail -1
+          }
+
+          TESTS="$(summary tests)"
+          SKIPPED="$(summary skipped)"
+          FAILED="$(summary fail)"
+
+          if [ -z "$TESTS" ] || [ -z "$SKIPPED" ] || [ -z "$FAILED" ]; then
+            echo "::error::TAP 报告里找不到汇总行，按失败处理。"
+            sed -n '1,40p' "$REPORT"
+            exit 1
+          fi
+
+          if [ "$TESTS" -eq 0 ]; then
+            echo "::error::0 个用例被执行：视口断言没有真正运行。"
+            exit 1
+          fi
+
+          if [ "$SKIPPED" -ne 0 ]; then
+            echo "::error::$SKIPPED 个视口用例被 skipped（共 $TESTS 个）：本 job 里 skip 说明 Chrome 没起来或探测路径失效，等于没有验证。"
+            grep '# SKIP' "$REPORT" | sed 's/^ok [0-9]* - //'
+            exit 1
+          fi
+
+          if [ "$FAILED" -ne 0 ]; then
+            echo "::error::$FAILED 个视口用例失败（共 $TESTS 个）：见上一步日志。"
+            exit 1
+          fi
+
+          echo "视口：$TESTS 个用例全部真实执行，0 失败，0 跳过。"
