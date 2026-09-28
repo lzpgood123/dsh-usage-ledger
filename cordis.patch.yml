@@ -1,0 +1,8 @@
+# dsh-usage-ledger bundle 层：插入一条插件行。
+#
+# 客户端模块扫描器要求 entry name 是**裸包名**（它会去解析 `<name>/package.json`），
+# 所以这里写 `dsh-usage-ledger`，不能写子路径。
+- insert:
+    - id: usage-ledger
+      name: dsh-usage-ledger
+      config: {}
