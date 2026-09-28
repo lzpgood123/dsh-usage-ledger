@@ -661,6 +661,16 @@ window.__ModuleLoader__.load({
 										h("span", null, `用时 ${fmtCount(data.diagnostics?.scanned ?? 0)} 新 / ${fmtCount(data.diagnostics?.cached ?? 0)} 缓存`),
 										h("span", null, data.timeZone?.name ?? ""),
 									),
+									// 读不出来的文件必须说出来。正常时这行不占位置；一旦出现，
+									// 它解释的是「为什么面板上的总量比预期少」——这正是
+									// 「静默失败」最不该发生的地方。
+									(data.diagnostics?.failed ?? 0) > 0
+										? h(
+												"div",
+												{ className: "ul-warn", style: { marginTop: "8px" } },
+												`${fmtCount(data.diagnostics.failed)} 个会话文件无法读取，未计入下面的数字。`,
+											)
+										: null,
 									// 口径说明。这句话必须显眼：数字容易被当成账单，而它衡量的是消耗程度。
 									h(
 										"div",

@@ -27,6 +27,19 @@
  * （166/166），失败尝试不计费。所以只统计带 usage 的 `assistant/message`，
  * 每个会话内 (turn, step) 唯一，不会重复计费。
  *
+ * ## 为什么 I/O 走 source seam
+ *
+ * 扫描策略（缓存失效、淘汰、失败计数、让出事件循环）是这里最容易出错、也最
+ * 值得测试的部分，但它原先和 `readdir`/`stat`/`readFile` 焊在一起，只有真实
+ * 目录上的真实文件才能验证。现在 I/O 收敛到 {@link Source} 这一个 seam 上：
+ * {@link diskSource} 是线上 adapter，内存 adapter 在测试里（`test/`）。
+ *
+ * 这是一个**内部 seam**：`Source` 只用于让扫描策略可测，不是领域概念，所以
+ * 它不出现在 `CONTEXT.md` 的词表里，也不该被当成对外接口使用。
+ *
+ * 实测：317 个会话文件冷扫描 3123ms，命中缓存 40ms——78 倍的差距全由这条
+ * 策略决定，而它此前零测试。
+ *
  * @module usage-ledger/scan
  */
 
@@ -110,7 +123,22 @@ export function scanZstdFrames(buffer) {
  * @returns JSONL 文本；损坏的尾帧被跳过而不是让整次读取失败。
  */
 export function decodeSessionBytes(buffer, compressed = true) {
-	if (!compressed) return buffer.toString("utf8");
+	return decodeWithDiagnostics(buffer, compressed).text;
+}
+
+/**
+ * 同 {@link decodeSessionBytes}，但额外报告帧数与是否压缩。
+ *
+ * 扫描器需要知道「一个非空压缩文件里到底有没有帧」，才能把完全不认识的容器
+ * 计成失败而不是静默的 0 条记录。这个诊断结果不进入公开的解压接口，避免把
+ * 实现细节摊到调用方。
+ *
+ * @param buffer - 文件字节。
+ * @param compressed - 是否按 Zstandard 多帧容器处理。
+ * @returns `{text, frames, compressed}`。
+ */
+function decodeWithDiagnostics(buffer, compressed) {
+	if (!compressed) return { text: buffer.toString("utf8"), frames: 1, compressed: false };
 	const { frames } = scanZstdFrames(buffer);
 	const parts = [];
 	for (const { start, end } of frames) {
@@ -120,7 +148,7 @@ export function decodeSessionBytes(buffer, compressed = true) {
 			// 单帧损坏不该让整个会话消失：跳过它，其余帧照常统计。
 		}
 	}
-	return Buffer.concat(parts).toString("utf8");
+	return { text: Buffer.concat(parts).toString("utf8"), frames: frames.length, compressed: true };
 }
 
 /**
@@ -282,60 +310,119 @@ export async function listSessionFiles(sessionsRoot) {
 }
 
 /**
- * 增量扫描全部会话日志。
+ * 扫描一个会话文件时要用的 I/O。
  *
- * 每个文件按 `mtimeMs + size` 缓存解析结果：只有真正变动的文件会被重新解压，
- * 所以面板刷新和定时重扫都是廉价的。会话日志是追加写的，文件一旦变动就整份
- * 重解析——单文件成本很低，而增量合并的复杂度不值得。
+ * 这是 {@link createScanner} 的内部 seam：把「字节从哪来」与「怎么统计」分开，
+ * 扫描策略才可能在没有真实目录的情况下被测试。线上用 {@link diskSource}，
+ * 测试用 `test/memory-source.js` 里的内存 adapter。
+ *
+ * 四个成员就是全部契约：
+ *
+ * - `list()` 返回**已按会话去重**的会话文件绝对路径。文件名规范与跨代消解
+ *   （见 {@link listSessionFiles}）属于磁盘 adapter 的实现，不属于扫描策略。
+ * - `stat(path)` 至少要有 `mtimeMs` 与 `size`——缓存键就是这两个值。
+ * - `read(path)` 返回整个文件的字节。
+ * - `compressed(path)` 说明该文件是不是 Zstandard 容器。
+ *
+ * @typedef {object} Source
+ * @property {() => Promise<string[]>} list
+ * @property {(path: string) => Promise<{mtimeMs: number, size: number}>} stat
+ * @property {(path: string) => Promise<Buffer>} read
+ * @property {(path: string) => boolean} compressed
+ */
+
+/**
+ * 从会话日志根目录构造线上 adapter。
  *
  * @param sessionsRoot - `$DSH_HOME/sessions`。
- * @param cache - 可复用的缓存 Map（跨调用保持）。
- * @returns `{records, stats}`，records 为全部计费记录。
+ * @returns {@link Source}。
  */
-export async function scanSessions(sessionsRoot, cache = new Map()) {
-	const files = await listSessionFiles(sessionsRoot);
-	const records = [];
-	const seen = new Set();
-	let scanned = 0;
-	let skipped = 0;
-	let failed = 0;
-
-	for (const file of files) {
-		let info;
-		try {
-			info = await stat(file);
-		} catch {
-			failed += 1;
-			continue;
-		}
-		const stamp = `${info.mtimeMs}:${info.size}`;
-		seen.add(file);
-		const hit = cache.get(file);
-		if (hit !== undefined && hit.stamp === stamp) {
-			records.push(...hit.records);
-			skipped += 1;
-			continue;
-		}
-		try {
-			const buffer = await readFile(file);
-			const { records: parsed } = parseSessionText(decodeSessionBytes(buffer, file.endsWith(".zstd")));
-			cache.set(file, { stamp, records: parsed });
-			records.push(...parsed);
-			scanned += 1;
-		} catch {
-			failed += 1;
-		}
-		// 解压是同步 CPU 工作，单帧最大到 MB 级。每扫几个文件主动让出一次事件
-		// 循环，宿主在这两秒里仍能响应请求，而不是被一次冷扫描整体卡住。
-		if (scanned % 8 === 0) await new Promise((resolve) => setImmediate(resolve));
-	}
-
-	for (const key of [...cache.keys()]) if (!seen.has(key)) cache.delete(key);
-
+export function diskSource(sessionsRoot) {
 	return {
-		records,
-		stats: { files: files.length, scanned, cached: skipped, failed, records: records.length },
+		list: () => listSessionFiles(sessionsRoot),
+		stat: (file) => stat(file),
+		read: (file) => readFile(file),
+		compressed: (file) => file.endsWith(".zstd"),
 	};
+}
+
+/**
+ * 创建一个增量扫描器。
+ *
+ * 扫描器持有缓存，所以它必须比单次请求活得久：`apply()` 里建一次，之后每个
+ * 请求、每次定时刷新都复用同一个实例。缓存按 `mtimeMs + size` 判失效，只有
+ * 真正变动的文件会被重新解压；会话日志是追加写的，文件一旦变动就整份重解析
+ * ——单文件成本很低，而增量合并的复杂度不值得。
+ *
+ * 缓存里不再出现的文件会被淘汰，所以长期运行不会无界增长。
+ *
+ * @param source - {@link Source}，必填；线上用 {@link diskSource}，测试用内存 adapter。
+ * @returns `{scan}`；`scan()` 解析为 `{records, stats}`。
+ */
+export function createScanner(source) {
+	const cache = new Map();
+
+	/**
+	 * 扫描一次。
+	 *
+	 * @returns `{records, stats}`，records 为全部计费记录。
+	 */
+	const scan = async () => {
+		const files = await source.list();
+		const records = [];
+		const seen = new Set();
+		let scanned = 0;
+		let skipped = 0;
+		let failed = 0;
+
+		for (const file of files) {
+			let info;
+			try {
+				info = await source.stat(file);
+			} catch {
+				failed += 1;
+				continue;
+			}
+			const stamp = `${info.mtimeMs}:${info.size}`;
+			seen.add(file);
+			const hit = cache.get(file);
+			if (hit !== undefined && hit.stamp === stamp) {
+				records.push(...hit.records);
+				skipped += 1;
+				continue;
+			}
+			try {
+				const buffer = await source.read(file);
+				const { text, frames, compressed } = decodeWithDiagnostics(buffer, source.compressed(file));
+				// 一个非空的压缩文件里一帧都认不出来，说明它不是本插件认识的
+				// 容器（被覆盖、格式变了）。这类文件以前会静默算成「读到了、
+				// 0 条记录」，让面板无法区分「都读到了」和「根本没读出来」。
+				// 空文件不算失败：会话刚建立时文件就是 0 字节。
+				if (compressed && buffer.length > 0 && frames === 0) {
+					failed += 1;
+					continue;
+				}
+				const { records: parsed } = parseSessionText(text);
+				cache.set(file, { stamp, records: parsed });
+				records.push(...parsed);
+				scanned += 1;
+			} catch {
+				failed += 1;
+			}
+			// 解压是同步 CPU 工作，单帧最大到 MB 级。每扫几个文件主动让出一次
+			// 事件循环，宿主在这两秒里仍能响应请求，而不是被一次冷扫描整体卡住。
+			if (scanned % 8 === 0) await new Promise((resolve) => setImmediate(resolve));
+		}
+
+		for (const key of [...cache.keys()]) if (!seen.has(key)) cache.delete(key);
+
+		return {
+			records,
+			stats: { files: files.length, scanned, cached: skipped, failed, records: records.length },
+		};
+	};
+
+	return { scan };
 }
 
 /** 一个空桶。 */

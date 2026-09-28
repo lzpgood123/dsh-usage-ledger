@@ -1,10 +1,13 @@
 {
   "name": "dsh-usage-ledger",
   "version": "0.1.0",
-  "description": "本地会话日志用量统计：按供应商、模型、时间聚合 token 消耗，零网络、零凭据",
+  "description": "本地会话日志用量统计：按渠道、模型、时间聚合 token 消耗，零网络、零凭据",
   "private": true,
   "type": "module",
   "main": "./src/index.js",
+  "scripts": {
+    "test": "node --test \"test/**/*.test.js\""
+  },
   "exports": {
     ".": {
       "default": "./src/index.js"

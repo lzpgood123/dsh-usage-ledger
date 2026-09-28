@@ -13,7 +13,7 @@
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { readFile } from "node:fs/promises";
-import { aggregate, scanSessions } from "./scan.js";
+import { aggregate, createScanner, diskSource } from "./scan.js";
 
 /** Cordis 插件名。 */
 export const name = "usage-ledger";
@@ -311,9 +311,10 @@ export function apply(ctx, config = {}) {
 	const pricingFile = typeof config.pricingFile === "string" && config.pricingFile !== "" ? config.pricingFile : resolvePricingFile(config);
 	const currency = config.currency ?? "CNY";
 	const logger = ctx.logger?.("usage-ledger") ?? ctx.logger;
-	const cache = new Map();
+	// 扫描器持有缓存，所以整个插件生命周期只建一次：每个请求、每次定时刷新
+	// 都复用同一个实例，否则缓存等于没有。
+	const scanner = createScanner(diskSource(sessionsRoot));
 	const startedAt = Date.now();
-	let lastStats = {};
 	/**
 	 * 当前生效的价格表与别名映射。
 	 *
@@ -339,20 +340,10 @@ export function apply(ctx, config = {}) {
 		refreshPricing().catch(() => undefined);
 	}
 
-	/**
-	 * 扫描一次。
-	 *
-	 * @returns 统计信息。
-	 */
-	const scan = async () => {
-		const { records, stats } = await scanSessions(sessionsRoot, cache);
-		lastStats = stats;
-		return { records, stats };
-	};
-
 	// 后台预热：首个面板请求不该为 58MB 日志买单。放在 apply 之后，让装配先完成。
 	const warm = () => {
-		scan()
+		scanner
+			.scan()
 			.then(({ stats }) => logger?.info?.("usage-ledger: warmed %d files (%d records)", stats.files, stats.records))
 			.catch((error) => logger?.warn?.("usage-ledger: warm scan failed: %s", error?.message ?? error));
 	};
@@ -368,7 +359,7 @@ export function apply(ctx, config = {}) {
 		try {
 			await refreshPricing();
 			const url = new URL(req.url ?? "/", "http://localhost");
-			const { records, stats } = await scan();
+			const { records, stats } = await scanner.scan();
 			const range = resolveRange(url.searchParams.get("range") ?? "all", url.searchParams.get("from"), url.searchParams.get("to"));
 			send(200, buildPayload(records, { range, pricing, aliases, rates, currency, stats: { ...stats, uptimeMs: Date.now() - startedAt } }));
 		} catch (error) {
@@ -421,7 +412,7 @@ export function apply(ctx, config = {}) {
 						handler: async (invocation) => {
 							try {
 								const range = resolveRange((invocation?.rawInput ?? "").trim() || "month");
-								const { records, stats } = await scan();
+								const { records, stats } = await scanner.scan();
 								const payload = buildPayload(records, { range, pricing, aliases, rates, currency, stats });
 								const lines = [
 									`用量 ${range.label}｜tokens ${payload.totals.tokens.toLocaleString()}｜请求 ${payload.totals.requests}｜缓存命中率 ${payload.totals.cacheHitRate}%`,

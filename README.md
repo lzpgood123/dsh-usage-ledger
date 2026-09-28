@@ -6,7 +6,7 @@ DSH 插件的本地用量面板：把会话日志里的 token 消耗按**渠道 
 
 ## 它做什么
 
-- 一个 Web 面板（挂在侧边栏页脚），支持按 今天 / 本周 / 本月 / 累计 / 自定义区间 切换
+- 一个 Web 面板（挂在侧边栏页脚），支持按 今天 / 近 7 天 / 本月 / 累计 / 自定义区间 切换
 - 分渠道、分模型两张可排序明细表
 - 近一年的活跃度热力图（371 天，整周对齐）
 - 缓存命中率、请求数、平均每请求 token
@@ -117,10 +117,32 @@ GET /api/usage-ledger?range=today|week|month|all|custom&from=YYYY-MM-DD&to=YYYY-
 ## 结构
 
 ```
-src/index.js    宿主端：扫描、按范围聚合、挂 HTTP 路由与 /usage 命令
+src/index.js    宿主端：挂 HTTP 路由与 /usage 命令，按范围聚合、计价
 src/scan.js     会话日志扫描与聚合（多帧 zstd 解压、usage 提取）
 src/client.js   浏览器端面板（手写 ModuleLoader bundle，无构建步骤）
+test/           扫描策略的测试与 fixture（见下）
 ```
+
+`src/scan.js` 里，扫描策略与文件 I/O 之间有一个内部 seam：`createScanner(source)`
+只依赖 `source` 的 `list`/`stat`/`read`/`compressed` 四个成员。线上用
+`diskSource(root)`，测试用 `test/memory-source.js` 里的内存 adapter。这不是对外
+接口——它存在的唯一目的是让缓存失效、淘汰、失败计数这些策略可以在没有真实目录
+的情况下被断言。
+
+`test/` 不进 npm 包（`package.json` 的 `files` 只发布 `src/`）。
+
+## 测试
+
+零依赖，用 Node 内置运行器（`node >= 22`）：
+
+```sh
+npm test        # 等价于 node --test
+```
+
+覆盖的是扫描策略：缓存命中与失效、删除后的淘汰、损坏文件与断尾帧的容错、
+跨代文件去重（`session.jsonl.zstd` 与 `session.vN.jsonl.zstd` 只取最高版本），
+以及 `recordOf` 的用量口径。fixture 全部在测试运行时用 `zstdCompressSync` 构造，
+仓库里不存二进制。
 
 ## License
 
