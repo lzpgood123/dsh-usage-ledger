@@ -13,13 +13,22 @@
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { readFile } from "node:fs/promises";
-import { aggregate, createScanner, diskSource } from "./scan.js";
+import { aggregate, createScanner, diskSource, localDayKey } from "./scan.js";
 
 /** Cordis 插件名。 */
 export const name = "usage-ledger";
 
 /** 面板读取的接口前缀。 */
 export const BASE_PATH = "/api/usage-ledger";
+
+/**
+ * 界面范围词表。
+ *
+ * 这是宿主端与浏览器端共用的**唯一**范围口径：客户端据此渲染标签页，宿主端据此
+ * 解析 `range` 查询参数。任何一端单独增删都会让另一端静默失效，所以它必须是
+ * 导出常量，由契约测试盯着。
+ */
+export const RANGE_KINDS = ["today", "week", "month", "all", "custom"];
 
 /**
  * 承载 Web 服务的服务名。
@@ -30,7 +39,7 @@ export const BASE_PATH = "/api/usage-ledger";
 const WEB_SERVER_NAMES = ["webServer", "httpServer"];
 
 /** 热力图覆盖的天数：一整年整周，避免首尾出现半截列。 */
-const ACTIVITY_DAYS = 371;
+export const ACTIVITY_DAYS = 371;
 
 /**
  * 解析会话日志根目录。
@@ -45,17 +54,6 @@ export function resolveSessionsRoot(config = {}) {
 }
 
 /**
- * 把本地日期折算为 `YYYY-MM-DD`。
- *
- * @param date - 日期对象。
- * @returns 本地日期键。
- */
-function dayKey(date) {
-	const pad = (value) => String(value).padStart(2, "0");
-	return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
-}
-
-/**
  * 把界面选的范围折算成闭区间日期。
  *
  * @param kind - `today` | `week` | `month` | `all` | `custom`。
@@ -65,13 +63,13 @@ function dayKey(date) {
  * @returns `{from, to, label}`；`from`/`to` 为 `null` 表示不设边界。
  */
 export function resolveRange(kind, from, to, now = new Date()) {
-	const today = dayKey(now);
+	const today = localDayKey(now.getTime());
 	switch (kind) {
 		case "today":
 			return { from: today, to: today, label: "今日" };
 		case "week": {
 			const start = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 6);
-			return { from: dayKey(start), to: today, label: "近 7 天" };
+			return { from: localDayKey(start.getTime()), to: today, label: "近 7 天" };
 		}
 		case "month":
 			return { from: `${today.slice(0, 8)}01`, to: today, label: "本月" };
@@ -123,10 +121,11 @@ export function costOf(bucket, price, options = {}) {
  * 组装面板所需的完整载荷。
  *
  * `activity` 覆盖固定的一年窗口，与所选范围无关——热力图是「全年作息」，
- * 让它随范围伸缩会失去意义。
+ * 让它随范围伸缩会失去意义。因此这里只做**一次**摊平：取「所选范围」与
+ * 「371 天窗口」的并集，同一次 `aggregate` 的结果同时供两者切片使用。
  *
  * @param records - 全部计费记录。
- * @param options - `{range, pricing, currency, stats}`。
+ * @param options - `{range, pricing, aliases, rates, currency, stats, now}`。
  * @returns 可直接序列化的载荷。
  */
 export function buildPayload(records, options = {}) {
@@ -137,9 +136,8 @@ export function buildPayload(records, options = {}) {
 		rates = {},
 		currency = "CNY",
 		stats = {},
+		now = new Date(),
 	} = options;
-	const scoped = aggregate(records, range);
-
 	// 用**官方模型定价**当统一标尺，与请求实际走的渠道无关。
 	//
 	// 这是一个刻意的口径选择：本机的用量散落在官方直连与多个中转站上，同一份
@@ -156,9 +154,27 @@ export function buildPayload(records, options = {}) {
 		return canonical in pricing ? canonical : undefined;
 	};
 
+	// 371 天窗口的起点。用本地日期做减法（不是固定毫秒），跨夏令时也不会偏一天。
+	const since = new Date(now.getTime());
+	since.setDate(since.getDate() - (ACTIVITY_DAYS - 1));
+	const sinceDay = localDayKey(since.getTime());
+
+	// 并集区间：起点取「范围起点」与「窗口起点」中更早的一个；**上界始终不设**。
+	// 上界不能沿用 `range.to`——热力图与所选范围无关，若跟着 `to` 截断，用户把
+	// 自定义范围选到过去时，整张全年热力图会凭空缩短。`from === null` 表示不设
+	// 下界，此时并集同样不设下界，否则会漏掉范围里更早的日期。
+	const unionFrom = range.from === null || range.from < sinceDay ? range.from : sinceDay;
+	const union = aggregate(records, { from: unionFrom, to: null });
+	// 仅当并集恰好等于所选范围时才复用：即下界相同、且范围本身不设上界。
+	// 其余情况（today/week/month、带 `to` 的自定义范围）必须按范围再摊平一次，
+	// 否则 totals/providers/models 会把窗口内、范围外的记录也算进去。
+	const scoped = unionFrom === range.from && range.to === null ? union : aggregate(records, range);
+
 	const unpriced = new Set();
 	let totalCost = 0;
 	let priced = false;
+	/** 渠道 → 其名下已定价模型的**未舍入**成本之和。 */
+	const providerCost = new Map();
 
 	const models = scoped.models.map((row) => {
 		const officialId = officialIdOf(row.model);
@@ -168,6 +184,8 @@ export function buildPayload(records, options = {}) {
 		else {
 			totalCost += cost;
 			priced = true;
+			// 渠道成本在这里一次算清：模型成本只算一遍，按渠道累加。
+			providerCost.set(row.provider, (providerCost.get(row.provider) ?? 0) + cost);
 		}
 		return {
 			...row,
@@ -177,46 +195,36 @@ export function buildPayload(records, options = {}) {
 	});
 
 	const providers = scoped.providers.map((row) => {
-		// 渠道成本按它名下各模型相加，逐模型判定是否定价。
-		let sum = 0;
-		let any = false;
-		for (const model of scoped.models) {
-			if (model.provider !== row.provider) continue;
-			const officialId = officialIdOf(model.model);
-			const cost = officialId === undefined ? undefined : costOf(model, pricing[officialId], { currency, rates });
-			if (cost !== undefined) {
-				sum += cost;
-				any = true;
-			}
-		}
-		return { ...row, cost: any ? Math.round(sum * 10000) / 10000 : null };
+		// 渠道成本 = 名下已定价模型的**未舍入**成本之和，最后只舍入一次。
+		// 若改成累加已舍入的模型成本，逐项误差会累积，渠道总额随之漂移。
+		const sum = providerCost.get(row.provider);
+		return { ...row, cost: sum === undefined ? null : Math.round(sum * 10000) / 10000 };
 	});
 
-	const since = new Date();
-	since.setDate(since.getDate() - (ACTIVITY_DAYS - 1));
-	const activity = aggregate(records, { from: dayKey(since), to: null }).days.map((row) => ({
-		day: row.day,
-		tokens: row.tokens,
-		requests: row.requests,
-	}));
-
-	const byDay = new Map(activity.map((row) => [row.day, row]));
+	// 热力图只需要三字段，且只含窗口内的日期——不要直接把 days 塞进去。
+	//
+	// 这里**只有下界**，没有上界：`sinceDay` 之前的日期被排除，但未来日期会照常
+	// 落进网格。这是沿用已久的既有行为（本机 11695 条记录里未来日期为 0 条，所以
+	// 从未显现），不是疏漏——热力图表达的是「作息」，而记录本不该出现未来时间。
+	// 若将来要加上界，请注意它与 `range.to` 无关：加错地方会让「自定义范围选到
+	// 过去」把整张全年热力图截短，那是真实回归。
+	const activity = union.days
+		.filter((row) => row.day >= sinceDay)
+		.map((row) => ({ day: row.day, tokens: row.tokens, requests: row.requests }));
 
 	return {
 		ok: true,
-		generatedAt: Date.now(),
+		generatedAt: now.getTime(),
 		timeZone: {
 			name: Intl.DateTimeFormat().resolvedOptions().timeZone,
-			offset: -new Date().getTimezoneOffset() / 60,
+			offset: -now.getTimezoneOffset() / 60,
 		},
 		range,
 		totals: scoped.totals,
 		providers,
 		models,
-		days: scoped.days,
 		activity,
 		activityDays: ACTIVITY_DAYS,
-		byDay: Object.fromEntries(byDay),
 		cost: {
 			currency,
 			total: priced ? Math.round(totalCost * 100) / 100 : null,

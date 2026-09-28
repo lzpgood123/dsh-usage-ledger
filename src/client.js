@@ -72,17 +72,6 @@ window.__ModuleLoader__.load({
 		}
 
 		/**
-		 * 把 `YYYY-MM-DD` 折算成 `M/D`。
-		 *
-		 * @param day - 日期键。
-		 * @returns 短日期。
-		 */
-		function shortDay(day) {
-			const parts = String(day).split("-");
-			return parts.length === 3 ? `${Number(parts[1])}/${Number(parts[2])}` : day;
-		}
-
-		/**
 		 * 取本地日期键。
 		 *
 		 * @param date - 日期对象。
@@ -202,11 +191,6 @@ window.__ModuleLoader__.load({
 		 * @returns `{data, error, loading, stale, reload}`。
 		 */
 		const usageCache = new Map();
-
-		/** 当前范围键，供定时器判断是否需要刷新。 */
-		function keyOfRange(range) {
-			return range.kind === "custom" ? `custom:${range.from ?? ""}:${range.to ?? ""}` : range.kind;
-		}
 
 		function useUsage(range) {
 			const query = (() => {

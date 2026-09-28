@@ -56,7 +56,12 @@ test("文件内容变化后返回新内容，不返回缓存里的旧记录", as
 test("同一 mtime 与 size 的改写会被缓存漏掉（已知盲区，明确记录）", async () => {
 	// mtime:size 是缓存键，所以「内容变了但这两个值都没变」无法察觉。这在
 	// 追加写的会话日志上不会发生（追加必然改 size），但盲区是真实存在的，
-	// 所以在这里钉住它：如果将来换了缓存键，这条测试会失败并提醒改文档。
+	// 所以在这里钉住它。
+	//
+	// 注意：这条测试**故意**让两次载荷字节数相同（见下面的前提断言），因此它
+	// 在 size 这一维上没有区分力——缓存键就算退化成只看 mtime，它照样通过。
+	// 真正钉住「缓存键必须含 size」的是后面那条「size 变大」的测试，两者不可
+	// 互相替代：这里测的是盲区本身，那里测的是缓存键的构造。
 	//
 	// 用未压缩的 .jsonl 造数据，才能让「字节数相同」成为构造保证，而不是
 	// 依赖 zstd 对不同内容恰好压出同样长度。
@@ -76,6 +81,27 @@ test("同一 mtime 与 size 的改写会被缓存漏掉（已知盲区，明确�
 	assert.equal(result.records[0].inputTokens, 11, "仍然是旧内容——这是已知盲区");
 });
 
+test("同一 mtime 但 size 变大时必须重新解析，不得返回陈旧字节", async () => {
+	// 上一条盲区测试故意让两次载荷等长，所以它区分不出缓存键里有没有 size。
+	// 这条反过来：mtime 钉死不动，只让 size 变大——只有缓存键真的包含 size
+	// 才会失效重解析。若 stamp 退化成只看 mtime，这里会命中陈旧缓存并交回
+	// inputTokens=11，把「文件明明变了」谎报成没变。
+	const withInput = (input) => sessionBytes([sessionEvent(), billedEvent({ input })]);
+	const small = withInput(11);
+	const big = sessionBytes([sessionEvent(), billedEvent({ input: 222222 }), billedEvent({ input: 333333 })]);
+	assert.notEqual(small.length, big.length, "前提：两次内容的字节数不同");
+
+	const source = memorySource({ [PATH]: { bytes: small, mtimeMs: 1000 } });
+	const scanner = createScanner(source);
+	await scanner.scan();
+
+	source.write(PATH, big, 1000); // mtime 不变，size 变大
+	const result = await scanner.scan();
+	assert.equal(result.stats.scanned, 1, "size 变了必须重新解析");
+	assert.equal(result.stats.cached, 0, "不得走缓存命中路径");
+	assert.equal(result.records[0].inputTokens, 222222, "不得返回陈旧字节");
+});
+
 test("文件从磁盘消失后，缓存条目被淘汰", async () => {
 	const source = memorySource({ [PATH]: { bytes: oneSession(), mtimeMs: 1000 } });
 	const scanner = createScanner(source);
@@ -90,6 +116,34 @@ test("文件从磁盘消失后，缓存条目被淘汰", async () => {
 	source.write(PATH, oneSession(), 3000);
 	const third = await scanner.scan();
 	assert.equal(third.stats.scanned, 1, "淘汰后重新出现要重新解析");
+});
+
+test("文件消失后以相同 mtime 与 size 恢复时，必须重新解析而非命中已删除的条目", async () => {
+	// 上一条淘汰测试恢复文件时用了新的 mtime（3000），所以缓存光靠 mtime 就
+	// 失效了，即使完全不淘汰也能通过——它对淘汰策略是空转的。这条把 mtime
+	// 和 size 都钉死不动，唯一能让缓存失效的机制就是「文件消失时被淘汰」。
+	// 若淘汰循环被删掉，旧条目会一直留在 cache 里，恢复后直接命中并交回删除
+	// 前的 inputTokens=111111。
+	const path = "/sessions/proj/session-1/session.jsonl";
+	const first = plainBytes([billedEvent({ input: 111111 })]);
+	const second = plainBytes([billedEvent({ input: 999999 })]);
+	assert.equal(first.length, second.length, "前提：两次内容的字节数相同");
+	assert.notDeepEqual(first, second, "前提：两次内容不同");
+
+	const source = memorySource({ [path]: { bytes: first, mtimeMs: 1000 } });
+	const scanner = createScanner(source);
+	await scanner.scan();
+
+	source.remove(path); // 消失 → 缓存条目必须被淘汰
+	const gone = await scanner.scan();
+	assert.equal(gone.stats.files, 0);
+	assert.deepEqual(gone.records, []);
+
+	source.write(path, second, 1000); // 以相同 mtime + 相同 size 恢复
+	const result = await scanner.scan();
+	assert.equal(result.stats.scanned, 1, "恢复的文件必须重新解析");
+	assert.equal(result.stats.cached, 0, "不得命中删除前的缓存条目");
+	assert.equal(result.records[0].inputTokens, 999999, "不得返回删除前的条目");
 });
 
 test("stat 失败的文件计入 failed，不影响其余文件", async () => {
