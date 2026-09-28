@@ -232,9 +232,11 @@ jobs:
           node-version: "24"
 
       # 必须装宿主主题包，否则这个 job 一定失败——而且是有意失败：
-      # test/appearance.test.js 读不到主题包时那 16 条会 skip，而 skip 会让
-      # `node --test` 非 0 退出，于是每个变异体都会被误判成 KILLED。脚本在
-      # 基线阶段就硬断言 skipped === 0 并拒绝继续，正是为了挡住这种虚假安全感。
+      # test/appearance.test.js 读不到主题包时那 16 条会 skip。实测（Node 24.19.0）
+      # skip **不会**让 `node --test` 非 0 退出，退出码仍是 0；真正的危害是这些用例
+      # 没有运行——变异体本该让测试变红却会全绿通过，被判成 SURVIVED，脚本于是报告
+      # 「这条行为无人看守」，而事实是用例根本没跑（假警报）。脚本在基线阶段就硬断言
+      # skipped === 0 并拒绝继续，正是为了挡住这种虚假安全感。
       # 缺主题包还会让 4 个变异体（token / opacity / 阴影）无法判定。
       - name: 全局安装宿主主题包（钉死版本）
         run: |
@@ -247,7 +249,8 @@ jobs:
           echo "UL_THEME_PATH=$THEME" >> "$GITHUB_ENV"
 
       # 不需要再套一层 skipped===0 的 shell 闸门：脚本自己已经在基线阶段
-      # 与每个变异体阶段各断言一次（skip ≠ 0 直接报错，绝不算 KILLED），
-      # 退出码语义已经覆盖。重复加闸门只会多一个会漂移的地方。
+      # 与每个变异体阶段各断言一次（skip ≠ 0 直接报错，记为 ERROR，
+      # 绝不当成 KILLED 或 SURVIVED），退出码语义已经覆盖。
+      # 重复加闸门只会多一个会漂移的地方。
       - name: 跑变异检查
         run: npm run mutate

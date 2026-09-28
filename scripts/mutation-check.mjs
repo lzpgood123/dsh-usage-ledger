@@ -35,10 +35,20 @@
  *
  * ## 为什么显式排除 `test/viewport.test.js`
  *
- * 那个文件要驱动真实 Chrome，在拿不到浏览器的机器上只能 `skip`；而 `skip` 会让
- * 整批测试**以非 0 退出**（Node 的 `node:test` 在有 skipped 用例时退出码不为 0）。
- * 若把它算进「测试失败」，每个变异体都会被误判成 KILLED。所以这里用**显式文件
- * 列表**排除它，并断言 `skipped === 0`——有任何 skip 就报错退出，绝不猜。
+ * 那个文件要驱动真实 Chrome，在拿不到浏览器的机器上只能 `skip`。
+ *
+ * 实测（Node 24.19.0）：`skip` **不会**让 `node --test` 非 0 退出——2 条用例里
+ * 1 条 `skip` 时退出码仍是 `0`，`# skipped 1` 与 `# fail 0` 并列。所以 `skip`
+ * 不会被算成「测试失败」，也就不会把变异体误判成 KILLED。
+ *
+ * 危险恰好相反：变异体本该让测试变红，若守它的用例被 `skip` 掉，整批测试依然全绿，
+ * 这个变异体就被判成 **SURVIVED**——脚本报「这条行为无人看守」，而事实是用例**根本
+ * 没运行**。那是假警报，会把人引向「补一条其实已经存在的测试」。
+ * （实测复现：摘掉下面的守卫、再把宿主主题包弄丢，`panel-shadow-none` 与
+ * `root-color-unknown-token` 两个变异体就会从 KILLED 变成 SURVIVED。）
+ *
+ * 所以这里用**显式文件列表**排除它，并在基线阶段与每个变异体阶段都断言
+ * `skipped === 0`——有任何 skip 就报错退出，绝不猜。
  *
  * 注意：给 `node --test` 传「测试通配符 + 否定通配符」在 Node 24 上**静默无效**
  * （否定 glob 不被支持，viewport 照跑）。所以这里在 JS 里直接算出文件数组，
@@ -59,9 +69,10 @@ const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 /**
  * 不参与变异检查的测试文件。
  *
- * `test/viewport.test.js` 依赖真实 Chrome：缺浏览器时它只能 `skip`，而 skip 会让
- * `node --test` 非 0 退出，于是每个变异体都会被误判成 KILLED。它有自己的 CI job，
- * 在那里 Chrome 缺失才算失败。理由见文件头注释。
+ * `test/viewport.test.js` 依赖真实 Chrome：缺浏览器时它只能 `skip`。skip 不会让
+ * `node --test` 非 0 退出（实测 Node 24.19.0 下退出码为 0），但被 skip 掉的用例
+ * **没有运行**——变异体于是会以「全绿」通过，被判成 SURVIVED（假警报）。它有自己的
+ * CI job，在那里 Chrome 缺失才算失败。理由见文件头注释。
  */
 const EXCLUDED_TESTS = new Set(["viewport.test.js"]);
 
@@ -391,8 +402,8 @@ async function main() {
 
 	try {
 		// 基线：未经变异的副本必须 0 失败、0 跳过。若基线就红/就 skip，
-		// 后面所有 KILLED/SURVIVED 都无从谈起（skip 会让退出码非 0，把每个
-		// 变异体都伪装成 KILLED）。
+		// 后面所有 KILLED/SURVIVED 都无从谈起（skip 不会让退出码非 0，但会让
+		// 变异体以「全绿」通过并被判成 SURVIVED，即「无人看守」的假警报）。
 		console.log("── 基线（未变异副本） ──");
 		const baseline = runTests(sandbox, files);
 		if (baseline.tap === null || baseline.tap.tests === null) {
@@ -406,8 +417,9 @@ async function main() {
 		}
 		if (baseline.tap.skipped !== 0) {
 			throw new Error(
-				`基线有 ${baseline.tap.skipped} 条用例被 skip。skip 会让 \`node --test\` 非 0 退出，` +
-					"从而把每一个变异体都误判成 KILLED——这是虚假安全感，脚本拒绝在这种环境下继续。" +
+				`基线有 ${baseline.tap.skipped} 条用例被 skip。skip 不会让 \`node --test\` 非 0 退出（实测退出码为 0），` +
+					"但被 skip 的用例没有运行：变异体本该变红却会全绿通过，从而被误判成 SURVIVED（假警报——报告说「无人看守」，实则是没跑）。" +
+					"脚本拒绝在这种环境下继续。" +
 					"\n  最常见的原因：宿主主题包没装上（test/appearance.test.js 读不到就只能 skip）。",
 			);
 		}
