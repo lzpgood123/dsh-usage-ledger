@@ -105,8 +105,17 @@ window.__ModuleLoader__.load({
   box-sizing:border-box;
   background:var(--dsw-alias-bg-layer-1);border:1px solid var(--dsw-alias-border-l3,currentColor);border-radius:var(--ul-radius);
   box-shadow:var(--dsw-elevation-panel);padding:14px 16px 16px}
-/* 窄视口：面板占满宽度。left/right 必须一起归零——只改 width 不改 left，
-   残留的 left:12px 仍会与宽度叠加把右边缘推出视口（实测 480px 下右边缘在 502px）。
+/* 窄视口：面板占满宽度。left/right 必须一起归零——只把 width 改成 auto、right 仍
+   不设的话，面板会收缩成「内容宽」（fixed 元素 left 有值 + right:auto + width:auto
+   → shrink-to-fit），实测 480px 下 computed width 是 544px、右边缘跑到 556px
+   （越界 76px）。注意这与「完全没修」时的 502px 是两个不同状态，别混：
+   - 502px = 连 box-sizing 都没有的修复前基线（left:12 + calc(100vw - 24px)，
+     再加 34px 的 padding/border）；
+   - 556px = 已加 box-sizing、但只改了 width:auto、没设 right 的半修状态
+     （此时 left 仍是 12px 也照样越界，因为 544px 是内容撑出来的）。
+   box-sizing 单独就能消掉 502，却消不掉 556——后者只有这里的 right:0 能治。
+   （left:0 另有一用：right:0 已经能防越界，但残留的 left:12px 会让窄屏白白少
+   12px 宽度，所以两者一起归零。）
    同时把 bottom 从 64px 收到 8px：64px 是对徽章高度的硬编码耦合，窄屏上
    徽章往往不在原位，那 64px 只会白白吃掉可视高度。 */
 @media (max-width:760px){

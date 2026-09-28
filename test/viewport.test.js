@@ -33,6 +33,24 @@
  * 的滚动宽度比视口还窄，任何基于 `body.scrollWidth` 的断言都会**放行**这个 bug。
  * 所以本文件的主断言是 `getBoundingClientRect()`，不是滚动宽度。
  *
+ * 上表的 502/790 是**完全没有修复**（既无 `box-sizing` 也无 `@media`）时的数字。
+ * 还有一个容易与它混淆的数字：**加了 `box-sizing`、把 `width` 改成 `auto`、但
+ * `right` 仍不设** 时 480px 的右边缘是 **556**（`fixed` 元素在 `left` 有值、
+ * `right:auto`、`width:auto` 时收缩成内容宽，实测 computed width 544px）。
+ * 502 与 556 属于两个不同的中间状态，`src/client.js` 的注释里说的正是
+ * 556 那个状态——别再把两者当成同一个数（这正是 #4 验收发现的注释错配）。
+ * （另注：`right:0` 才是防越界的那条；`left:0` 是为了不在窄屏上白留 12px。
+ * 这条区分也写进了 `src/client.js` 的注释。）
+ *
+ * ## 为什么还要单独守 @media 块
+ *
+ * 只加 `box-sizing:border-box`（把 `@media` 整块删掉）就已经让四档全部落在视口内
+ * —— 主断言无法区分「两处修复都在」与「只有 box-sizing」。而 `@media` 确实改变
+ * 了窄视口的几何：480px 下面板从 `left:12/right:468` 变成 `left:0/right:480`、
+ * 下边距从 64px 变成 8px。这些行为若无断言守护，`@media` 就是一段测不到的代码
+ * ——它哪天被删掉，测试照样全绿。下面的 @media 用例就是为此存在的：
+ * 它**刻意与「不越界」无关**（两种状态都不越界），只钉住断点内外的几何差异。
+ *
  * ## Chrome 缺失时必须显式 skip
  *
  * 与 `test/appearance.test.js` 一致：读不到浏览器就 `t.skip()` 并说明原因，
@@ -354,6 +372,14 @@ window.__ul = (() => {
 				// 主指标：fixed 浮层有没有被切出视口。body/document 的滚动宽度都测不到它。
 				panelLeft: round(rect.left),
 				panelRight: round(rect.right),
+				// @media 行为断言的指标。面板是 bottom:<n>px 定位的，所以「bottom 收到 8px」
+				// 体现为「面板下边缘距视口下边缘 8px」，而不是一个绝对坐标——必须量 gap。
+				panelBottom: round(rect.bottom),
+				innerHeight: window.innerHeight,
+				// 只用于自检「视口模拟真的生效了」：matchMedia 是拿查询文本对**视口**求值，
+				// 完全不读注入的样式表，所以它**证明不了** @media 块存在。命中与否由几何断言负责，
+				// 这里只排除「Emulation 没把宽度改掉，断言在错误的视口上跑」这一种事故。
+				narrowQueryMatches: window.matchMedia("(max-width:760px)").matches,
 				panelClipped: rect.left < -0.5 || rect.right > viewport + 0.5,
 				// 次要指标：面板**自身**内部是否横向滚动（与下面两条一起构成完整画面）。
 				panelScrollsX: panel.scrollWidth > panel.clientWidth,
@@ -645,5 +671,92 @@ test("视口：面板自身不出现横向滚动（次要断言，守 .ul-tablew
 		true,
 		"480px：表格没有超出面板内宽，说明载荷不够宽或 tablewrap 失效；" +
 			"此时「面板自身不横向滚动」是一条恒真的空断言，无法守住任何承诺。",
+	);
+});
+
+/**
+ * 断点内外的期望几何。
+ *
+ * 这些数字是**实测**出来的（真实 Chrome，Chrome 147），不是从 CSS 反推的：
+ *
+ * | 视口 | 命中 @media | left | right | 下边距 |
+ * |------|-------------|------|-------|--------|
+ * | 480  | 是          | 0    | 480   | 8      |
+ * | 768  | 否          | 12   | 756   | 64     |
+ *
+ * 关键点：`@media (max-width:760px)` 是**排他**的，768 不命中。两条分支的
+ * `left` 与下边距互不相同，所以断言能真正区分「命中了」与「没命中」。
+ */
+const NARROW_VIEWPORT = { width: 480, left: 0, right: 480, bottomGap: 8 };
+const WIDE_VIEWPORT = { width: 768, left: 12, right: 756, bottomGap: 64 };
+
+test("视口：@media (max-width:760px) 在 480px 命中（left 归零、right 贴边、bottom 收到 8px）、768px 不命中", async (t) => {
+	if (skipWithoutChrome(t)) return;
+	const results = await measureAll();
+	const at = (width) => results.find((result) => result.width === width);
+
+	// 自检：Emulation.setDeviceMetricsOverride 真的把视口宽度改掉了。若这条不成立，
+	// 下面的几何断言是在**错误的视口**上求的值，结论无意义。
+	// 注意它**不**校验 @media 块是否存在：matchMedia 只对视口求值，不读注入的样式表。
+	for (const expected of [NARROW_VIEWPORT, WIDE_VIEWPORT]) {
+		const result = at(expected.width);
+		assert.equal(result.innerWidth, expected.width, `Emulation 没有生效：请求 ${expected.width}px，实际 innerWidth=${result.innerWidth}`);
+	}
+
+	// ---- 480px：断点内，必须命中 ----
+	//
+	// 这三条合起来把 @media 块钉死。它们**不是**在重复「不越界」那条主断言：
+	// 只加 box-sizing、删掉整个 @media 时，480px 的几何是 left:12/right:468/
+	// 下边距 64——同样不越界，但 left/right/bottom 三条断言全红。
+	const narrow = at(NARROW_VIEWPORT.width);
+	assert.equal(
+		narrow.narrowQueryMatches,
+		true,
+		"480px：`(max-width:760px)` 没有命中，断点被改小或写错了（下面的几何断言会在错误的媒体条件下求值）",
+	);
+	assert.equal(
+		narrow.panelLeft,
+		NARROW_VIEWPORT.left,
+		`480px：面板左边缘在 ${narrow.panelLeft}px，应当是 ${NARROW_VIEWPORT.left}px（@media 里 left 归零）。` +
+			"残留的 left:12px 说明断点没命中或 @media 块被删——它不会让面板越界，但窄屏下白白吃掉 12px 宽度。",
+	);
+	assert.equal(
+		narrow.panelRight,
+		NARROW_VIEWPORT.right,
+		`480px：面板右边缘在 ${narrow.panelRight}px，应当是 ${NARROW_VIEWPORT.right}px（right:0 贴到视口右边界）。` +
+			"若为 468，说明 @media 块整个没生效（right 没归零）。",
+	);
+	assert.equal(
+		Math.round((narrow.innerHeight - narrow.panelBottom) * 100) / 100,
+		NARROW_VIEWPORT.bottomGap,
+		`480px：面板下边缘距视口下边缘 ${Math.round((narrow.innerHeight - narrow.panelBottom) * 100) / 100}px，应当是 ${NARROW_VIEWPORT.bottomGap}px。` +
+			"若为 64，说明 @media 里 bottom 没有从 64px 收到 8px——窄屏上那 64px 是白吃的可视高度。",
+	);
+
+	// ---- 768px：恰在断点之外，不得命中 ----
+	//
+	// 768 > 760，所以 `max-width:760px` 不成立，面板应保持基准几何。
+	// 这条防的是「把断点放宽/写错，连 768 也一并命中」——那种情况下 480px 的三条
+	// 断言仍然全绿，只有这里会红。
+	const wide = at(WIDE_VIEWPORT.width);
+	assert.equal(
+		wide.narrowQueryMatches,
+		false,
+		"768px：`(max-width:760px)` 竟然命中，断点被放宽到了 768 以上",
+	);
+	assert.equal(
+		wide.panelLeft,
+		WIDE_VIEWPORT.left,
+		`768px：面板左边缘在 ${wide.panelLeft}px，应当是 ${WIDE_VIEWPORT.left}px——768 已超出 max-width:760px，不该命中 @media`,
+	);
+	assert.equal(
+		wide.panelRight,
+		WIDE_VIEWPORT.right,
+		`768px：面板右边缘在 ${wide.panelRight}px，应当是 ${WIDE_VIEWPORT.right}px——768 已超出 max-width:760px，不该命中 @media`,
+	);
+	assert.equal(
+		Math.round((wide.innerHeight - wide.panelBottom) * 100) / 100,
+		WIDE_VIEWPORT.bottomGap,
+		`768px：面板下边缘距视口下边缘 ${Math.round((wide.innerHeight - wide.panelBottom) * 100) / 100}px，应当是 ${WIDE_VIEWPORT.bottomGap}px——768 已超出 max-width:760px，bottom 不该被收到 8px`,
 	);
 });
