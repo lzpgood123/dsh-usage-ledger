@@ -7,9 +7,11 @@ DSH 插件的本地用量面板：把会话日志里的 token 消耗按**渠道 
 ## 它做什么
 
 - 一个 Web 面板（挂在侧边栏页脚），支持按 今日 / 近 7 天 / 本月 / 累计 / 自定义 切换
+- 外观**跟随宿主主题**（浅色 / 深色 / 跟随系统）：面板用宿主设计 token 上色，
+  不自己判断当前主题（热力图色阶是插件自带常量，因为宿主没有强度色阶 token）
 - 分渠道、分模型两张可排序明细表
 - 近一年的活跃度热力图（371 天，整周对齐）
-- 缓存命中率、请求数、平均每请求 token
+- 消耗总量、请求数、输入/输出/缓存读/缓存写、推理 token、缓存命中率
 - 一个 `/usage [today|week|month|all]` 文本命令，不开浏览器也能看一眼
 
 ## 数据源
@@ -114,6 +116,16 @@ GET /api/usage-ledger?range=today|week|month|all|custom&from=YYYY-MM-DD&to=YYYY-
 
 **不读凭据、不发网络请求。** 面板里的通道数量就是这些——没有别的。
 
+**外观只依赖宿主 token。** 面板的颜色取自宿主的 `--dsw-alias-*` 变量（唯一的例外
+是热力图五档色阶——宿主没有强度色阶 token，它由插件自带常量、按
+`body[data-ds-dark-theme]` 分主题给出），不自己判断当前主题、也不写深色专用的
+兜底值：宿主默认是「跟随系统」，而 CSS 的 `var()` 在变量不存在时**不报错**，
+会静默落到兜底值。此前面板引用了两个宿主并不存在的 token，于是浅色系统上正文
+对比度只剩 1.25:1（WCAG AA 需 4.5:1）、卡片与分隔线整片消失——而错误 token 名
+写在**不导出**的 CSS 字符串里，测试够不到。现在 token 名的存在性由
+`test/appearance.test.js` 对照宿主主题包断言。理由与代价见
+`docs/adr/0006-appearance-host-tokens-only.md`。
+
 **两端共用口径，但不共享代码。** 接口前缀、范围词表、热力图天数是宿主端与浏览器端
 各自写一遍的：浏览器端 bundle 是传统 `<script src>`（不是 ES module），它的 `require`
 也不认相对路径，抽不出共享模块。所以靠 `test/contract.test.js` 钉住两端一致，
@@ -129,6 +141,7 @@ test/scan.test.js          扫描策略：缓存、淘汰、容错
 test/list-sessions.test.js 会话文件枚举与跨代去重
 test/payload.test.js       载荷组装：范围折算、371 天窗口、渠道计价
 test/client.test.js        浏览器端导出的纯函数与组件
+test/appearance.test.js    外观契约：宿主 token 存在性、色阶可辨、键盘可达
 test/contract.test.js      跨端契约：两端字面量必须一致（见下）
 test/fixtures.js           事件构造器（运行时压缩，不入库二进制）
 test/memory-source.js      内存版 Source adapter
@@ -149,7 +162,7 @@ test/client-harness.js     浏览器端 bundle 的 stub-loader 夹具
 零依赖，用 Node 内置运行器（`node >= 22`）：
 
 ```sh
-npm test        # node --test "test/**/*.test.js"，55 个用例
+npm test        # node --test "test/**/*.test.js"，86 个用例
 ```
 
 注意 glob 不能省：裸 `node --test` 会把 `test/` 下的**所有** `.js` 都当测试文件
@@ -176,6 +189,15 @@ npm test        # node --test "test/**/*.test.js"，55 个用例
   被 `fetch` 使用（存在不等于被使用）。理由见
   `docs/adr/0005-cross-end-contract-by-test.md`——浏览器端 bundle 不是 ES module，
   它的 `require` 也不认相对路径，两端无法共享代码，只能靠断言钉住一致。
+- **外观**（`appearance.test.js`）：把宿主主题包当权威来源读进来，断言
+  `src/client.js` 引用的每个 `--dsw-alias-*` token 都真实存在（错误 token 名此前
+  写在**不导出**的 CSS 字符串里，测试够不到，见
+  `docs/adr/0006-appearance-host-tokens-only.md`）；断言不存在深色专用的 `var()`
+  兜底值、完全不使用 `color-mix()`；按 WCAG 相对亮度验证热力图 L1–L4 在浅色与
+  深色下都相对面板底色可见、相邻档位两两可辨，且正文/次要文字都达到 4.5:1；
+  以及键盘契约——`aria-sort` 真的接到排序状态、可排序表头是真实 `<button>`、
+  面板是 `role="dialog"`、Esc 真的关闭、焦点进得来也回得去、`:focus-visible` 可见。
+  宿主主题包不存在时，依赖它的用例会显式 `t.skip()` 并说明原因，而不是假装通过。
 
 fixture 全部在测试运行时用 `zstdCompressSync` 构造，仓库里不存二进制。
 

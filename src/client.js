@@ -93,57 +93,108 @@ window.__ModuleLoader__.load({
 		 * 定义在面板根节点上，不会外泄到宿主。
 		 */
 		const CSS = `
-.ul-root{--ul-gap:10px;--ul-radius:10px;font-size:12px;line-height:1.6;color:var(--dsw-alias-text-primary,#e6e6e6)}
-.ul-backdrop{position:fixed;inset:0;z-index:60}
-.ul-panel{position:fixed;z-index:61;left:12px;bottom:64px;width:min(760px,calc(100vw - 24px));max-height:min(78vh,820px);overflow:auto;
-  background:var(--dsw-alias-bg-layer-1,#1b1b1b);border:1px solid var(--dsw-alias-border-1,rgba(255,255,255,.12));border-radius:var(--ul-radius);
-  box-shadow:0 18px 48px rgba(0,0,0,.45);padding:14px 16px 16px}
+.ul-root{--ul-radius:10px;font-size:12px;line-height:1.6;color:var(--dsw-alias-label-primary,currentColor)}
+.ul-backdrop{position:fixed;inset:0;z-index:999}
+.ul-panel{position:fixed;z-index:1000;left:12px;bottom:64px;width:min(760px,calc(100vw - 24px));max-height:min(78vh,820px);overflow:auto;
+  background:var(--dsw-alias-bg-layer-1);border:1px solid var(--dsw-alias-border-l3,currentColor);border-radius:var(--ul-radius);
+  box-shadow:var(--dsw-elevation-panel);padding:14px 16px 16px}
 .ul-head{display:flex;align-items:center;gap:8px;margin-bottom:10px}
 .ul-title{font-size:13px;font-weight:600;flex:1}
-.ul-iconbtn{background:transparent;border:1px solid var(--dsw-alias-border-1,rgba(255,255,255,.14));color:inherit;border-radius:6px;
+.ul-iconbtn{background:transparent;border:1px solid var(--dsw-alias-border-l2,currentColor);color:inherit;border-radius:6px;
   width:26px;height:26px;line-height:1;cursor:pointer;font-size:13px;padding:0}
-.ul-iconbtn:hover{background:var(--dsw-alias-bg-layer-2,rgba(255,255,255,.06))}
+.ul-iconbtn:hover{background:var(--dsw-alias-bg-layer-2)}
 .ul-tabs{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px;align-items:center}
-.ul-tab{background:transparent;border:1px solid var(--dsw-alias-border-1,rgba(255,255,255,.14));color:inherit;border-radius:999px;
+.ul-tab{background:transparent;border:1px solid var(--dsw-alias-border-l2,currentColor);color:inherit;border-radius:999px;
   padding:3px 11px;cursor:pointer;font-size:12px}
-.ul-tab[data-on="1"]{background:var(--dsw-alias-bg-layer-3,rgba(255,255,255,.14));border-color:transparent;font-weight:600}
-.ul-date{background:var(--dsw-alias-bg-layer-2,rgba(255,255,255,.06));border:1px solid var(--dsw-alias-border-1,rgba(255,255,255,.14));
+/* 选中态做成实心药丸：浅色下近黑底白字，深色下近白底深字，两个主题都成立，
+   也不再依赖浅色里与 bg-layer-1 同为 #fff 的 bg-layer-3。 */
+.ul-tab[data-on="1"]{background:var(--dsw-alias-brand-primary);color:var(--dsw-alias-label-primary-foreground);border-color:transparent;font-weight:600}
+.ul-date{background:var(--dsw-alias-bg-layer-2);border:1px solid var(--dsw-alias-border-l2,currentColor);
   color:inherit;border-radius:6px;padding:3px 6px;font-size:11px}
 .ul-cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(104px,1fr));gap:8px;margin-bottom:12px}
-.ul-card{background:var(--dsw-alias-bg-layer-2,rgba(255,255,255,.04));border:1px solid var(--dsw-alias-border-1,rgba(255,255,255,.08));
+/* 浅色下 bg-layer-1/2/3 都是 #fff，层次只能靠边框承担，所以卡片必须带 border-l2。 */
+.ul-card{background:var(--dsw-alias-bg-layer-2);border:1px solid var(--dsw-alias-border-l2,currentColor);
   border-radius:8px;padding:8px 10px}
-.ul-card .k{font-size:11px;opacity:.66;margin-bottom:2px}
+.ul-card .k{font-size:11px;color:var(--dsw-alias-label-secondary,currentColor);margin-bottom:2px}
 .ul-card .v{font-size:15px;font-weight:600;font-variant-numeric:tabular-nums}
 .ul-sec{margin-top:14px}
-.ul-sec>h4{margin:0 0 7px;font-size:12px;font-weight:600;opacity:.85;display:flex;gap:8px;align-items:baseline}
-.ul-sec>h4 .hint{font-size:11px;opacity:.5;font-weight:400}
+.ul-sec>h4{margin:0 0 7px;font-size:12px;font-weight:600;display:flex;gap:8px;align-items:baseline}
+.ul-sec>h4 .hint{font-size:11px;color:var(--dsw-alias-label-secondary,currentColor);font-weight:400}
 .ul-heat{display:grid;grid-auto-flow:column;grid-template-rows:repeat(7,minmax(0,1fr));gap:2px;align-content:start;flex:1 1 auto;min-width:0}
-.ul-heat i{width:100%;aspect-ratio:1;border-radius:2px;background:var(--dsw-alias-bg-layer-2,rgba(255,255,255,.06));display:block}
+.ul-heat i{width:100%;aspect-ratio:1;border-radius:2px;background:var(--dsw-alias-bg-layer-2);display:block}
+/* 热力图五档：静态色 + 宿主深色选择器分主题给出。
+   刻意不用 CSS 混色函数——它没有 @supports 回退，且色相会随主题反转。
+   真实格子与图例色块**共用同一条规则**（同一声明里的两个选择器），
+   每个色值在全文件只出现一次：改档位时不可能只改到其中一处。 */
+.ul-heat i[data-l="0"],.ul-legend i[data-l="0"]{background:var(--dsw-alias-bg-layer-2)}
+.ul-heat i[data-l="1"],.ul-legend i[data-l="1"]{background:#cfe0fd}
+.ul-heat i[data-l="2"],.ul-legend i[data-l="2"]{background:#93c5fd}
+.ul-heat i[data-l="3"],.ul-legend i[data-l="3"]{background:#3b82f6}
+.ul-heat i[data-l="4"],.ul-legend i[data-l="4"]{background:#1e40af}
+body[data-ds-dark-theme] .ul-heat i[data-l="1"],body[data-ds-dark-theme] .ul-legend i[data-l="1"]{background:#1e3a8a}
+body[data-ds-dark-theme] .ul-heat i[data-l="2"],body[data-ds-dark-theme] .ul-legend i[data-l="2"]{background:#2563eb}
+body[data-ds-dark-theme] .ul-heat i[data-l="3"],body[data-ds-dark-theme] .ul-legend i[data-l="3"]{background:#60a5fa}
+body[data-ds-dark-theme] .ul-heat i[data-l="4"],body[data-ds-dark-theme] .ul-legend i[data-l="4"]{background:#c7ddff}
 .ul-heatwrap{display:flex;gap:6px;align-items:flex-start;padding-bottom:4px}
-.ul-heatdays{display:grid;grid-template-rows:repeat(7,minmax(0,1fr));gap:2px;font-size:9px;opacity:.5;line-height:1;text-align:right;flex:0 0 auto;padding-top:15px}
-.ul-monthrow{display:grid;gap:2px;font-size:9px;opacity:.55;margin-bottom:3px;flex:1 1 auto;min-width:0;overflow:hidden}
-.ul-legend{display:flex;align-items:center;gap:4px;font-size:10px;opacity:.55;margin-top:5px}
+.ul-heatdays{display:grid;grid-template-rows:repeat(7,minmax(0,1fr));gap:2px;font-size:9px;color:var(--dsw-alias-label-secondary,currentColor);line-height:1;text-align:right;flex:0 0 auto;padding-top:15px}
+.ul-monthrow{display:grid;gap:2px;font-size:9px;color:var(--dsw-alias-label-secondary,currentColor);margin-bottom:3px;flex:1 1 auto;min-width:0;overflow:hidden}
+.ul-legend{display:flex;align-items:center;gap:4px;font-size:10px;color:var(--dsw-alias-label-secondary,currentColor);margin-top:5px}
 .ul-legend i{width:10px;height:10px;border-radius:2px;display:block}
 .ul-table{width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums}
-.ul-table th{text-align:right;font-weight:500;opacity:.6;font-size:11px;padding:4px 6px;border-bottom:1px solid var(--dsw-alias-border-1,rgba(255,255,255,.1));
+.ul-table th{text-align:right;font-weight:500;color:var(--dsw-alias-label-secondary,currentColor);font-size:11px;padding:4px 6px;border-bottom:1px solid var(--dsw-alias-border-l2,currentColor);
   cursor:pointer;white-space:nowrap;user-select:none}
 .ul-table th:first-child,.ul-table td:first-child{text-align:left}
-.ul-table td{text-align:right;padding:3px 6px;border-bottom:1px solid var(--dsw-alias-border-1,rgba(255,255,255,.05));white-space:nowrap}
-.ul-table tr:hover td{background:var(--dsw-alias-bg-layer-2,rgba(255,255,255,.04))}
+.ul-table td{text-align:right;padding:3px 6px;border-bottom:1px solid var(--dsw-alias-border-l1,currentColor);white-space:nowrap}
+.ul-table tr:hover td{background:var(--dsw-alias-bg-layer-2)}
 .ul-name{max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:inline-block;vertical-align:bottom}
-.ul-bar{position:relative;height:4px;border-radius:2px;background:var(--dsw-alias-bg-layer-3,rgba(255,255,255,.1));min-width:44px}
-.ul-bar>span{position:absolute;inset:0 auto 0 0;border-radius:2px;background:var(--dsw-alias-brand-primary,#5b8def)}
-.ul-muted{opacity:.55}
-.ul-warn{background:rgba(224,160,0,.12);border:1px solid rgba(224,160,0,.35);border-radius:8px;padding:7px 9px;font-size:11px;margin-top:10px}
-.ul-err{color:#e46a6a}
-.ul-load{opacity:.6;padding:18px 0;text-align:center}
-.ul-foot{display:flex;gap:10px;align-items:center;margin-top:12px;font-size:11px;opacity:.5}
+.ul-bar{position:relative;height:4px;border-radius:2px;background:var(--dsw-alias-border-l2,currentColor);min-width:44px}
+.ul-bar>span{position:absolute;inset:0 auto 0 0;border-radius:2px;background:var(--dsw-alias-state-business-primary)}
+.ul-muted{color:var(--dsw-alias-label-secondary,currentColor)}
+/* 琥珀色只用来表达「这是警告」——底、边、图标。文字仍用正文墨色：
+   --dsw-alias-state-warn-label 是给**普通底色**上的琥珀文字用的，铺在 warn-tertiary
+   上只有 2.58:1（实测），反而比不改更难读。宿主自己也是这么分的。 */
+.ul-warn{background:var(--dsw-alias-state-warn-tertiary);border:1px solid var(--dsw-alias-state-warn-secondary);
+  color:var(--dsw-alias-label-primary);border-radius:8px;padding:7px 9px;font-size:11px;margin-top:10px}
+/* 警告块里的次要文字不能沿用全局 .ul-muted 的低不透明度，否则又掉回低对比度。 */
+.ul-warn .ul-muted{color:var(--dsw-alias-label-secondary);opacity:1}
+/* 与 .ul-warn 同款：红色只表达「这是错误」（底），文字回到正文墨色。
+   state-error-primary 是宿主给**错误文字**用的 token（宿主自己用了 76 处），
+   但它的浅色值 red-600 在白底上只有 4.4976:1，比 WCAG AA 的 4.5 差 0.0024——
+   卡在线上，不值得为它破例。用墨色文字 + 淡红底，两种主题都有充足余量
+   （浅 15.80:1 / 深 14.31:1）。 */
+.ul-err{background:var(--dsw-alias-file-diff-deleted-bg);color:var(--dsw-alias-label-primary);
+  border-radius:8px;padding:7px 9px;margin-top:10px}
+.ul-load{color:var(--dsw-alias-label-secondary,currentColor);padding:18px 0;text-align:center}
+.ul-foot{display:flex;gap:10px;align-items:center;margin-top:12px;font-size:11px;color:var(--dsw-alias-label-secondary,currentColor)}
 .ul-badge{display:flex;align-items:center;gap:6px;width:100%;background:transparent;border:0;color:inherit;cursor:pointer;
   padding:5px 8px;border-radius:7px;font-size:12px;text-align:left}
-.ul-badge:hover{background:var(--dsw-alias-bg-layer-2,rgba(255,255,255,.07))}
-.ul-badge .dot{width:7px;height:7px;border-radius:50%;background:var(--dsw-alias-brand-primary,#5b8def);flex:0 0 auto}
+.ul-badge:hover{background:var(--dsw-alias-bg-layer-2)}
+/* 强调色用 business 蓝，而不是 brand-primary——后者在宿主里是墨色/对比色，不是色相。 */
+.ul-badge .dot{width:7px;height:7px;border-radius:50%;background:var(--dsw-alias-state-business-primary);flex:0 0 auto}
 .ul-badge .t{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.ul-badge .n{font-variant-numeric:tabular-nums;opacity:.75}
+.ul-badge .n{font-variant-numeric:tabular-nums;color:var(--dsw-alias-label-secondary,currentColor)}
+/* 表格自己横向滚动，纵向仍由 .ul-panel 承担。以前 overflow 在面板上，表格一超宽
+   就把表头、范围标签、卡片一起推走——整块面板都在滑。 */
+.ul-tablewrap{overflow-x:auto}
+/* tokens 列的数值不换行：列被挤窄时它是最后一个该让步的东西。 */
+.ul-num{white-space:nowrap}
+.ul-table{width:100%;min-width:0}
+/* 名称列吸收余量，数值列按内容定宽：表格因此不再有固定的 min-content 下限。 */
+.ul-table th:first-child,.ul-table td:first-child{width:100%;max-width:0}
+.ul-table td:first-child .ul-name{max-width:none;width:100%}
+/* 可排序表头是按钮：外层 th 不再假装可点，指针样式只给真正能点的按钮。 */
+.ul-table th{cursor:default}
+/* 名称列弹性：覆盖掉上面的 260px 硬上限。它与 tokens 列的 76px 下限一起把表格
+   撑到 min-content ≈837px，而面板内宽只有 728px。溢出仍用 ellipsis，title 保留全名。 */
+.ul-name{max-width:none}
+.ul-sort{display:inline-flex;align-items:baseline;gap:2px;background:transparent;border:0;color:inherit;font:inherit;
+  padding:2px 4px;margin:-2px -4px;border-radius:4px;cursor:pointer;white-space:nowrap}
+.ul-sort:hover{background:var(--dsw-alias-bg-layer-2)}
+.ul-arrow{font-size:10px;opacity:.9}
+/* 键盘焦点必须看得见：用宿主 token 描边，两个主题都成立。 */
+.ul-sort:focus-visible,.ul-tab:focus-visible,.ul-iconbtn:focus-visible,.ul-badge:focus-visible,.ul-date:focus-visible{
+  outline:2px solid var(--dsw-alias-state-business-primary);outline-offset:1px}
+.ul-panel:focus-visible{outline:2px solid var(--dsw-alias-state-business-primary);outline-offset:2px}
 `;
 
 		/** 样式只注入一次。 */
@@ -296,6 +347,104 @@ window.__ModuleLoader__.load({
 
 		//#endregion
 
+		//#region 分档与排序
+
+		/**
+		 * 线性插值取分位点。
+		 *
+		 * 不用「取第 k 个」：活跃日往往只有十几个，取整下标会让相邻边界落到同一个
+		 * 值上，四档随即塌成一两档。
+		 *
+		 * @param sorted - 已升序排好的数值数组。
+		 * @param p - 分位，0..1。
+		 * @returns 分位点。
+		 */
+		function quantile(sorted, p) {
+			if (sorted.length === 0) return 0;
+			const position = (sorted.length - 1) * p;
+			const lower = Math.floor(position);
+			const upper = Math.ceil(position);
+			if (lower === upper) return sorted[lower];
+			return sorted[lower] + (sorted[upper] - sorted[lower]) * (position - lower);
+		}
+
+		/**
+		 * 造一个分档函数：按**活跃日**的分位数把热力图切成 L1..L4。
+		 *
+		 * 线性分档（当日 token / 全窗口峰值）在这里是错的：本机 13 个活跃日里最高日
+		 * 是中位数的 18.6 倍，一个峰值就把其余 12 天全压进最低档——实测 L1=10、L2=1、
+		 * L3=0、L4=2，整年看起来像只有两天在干活。分位数只看排序后的**位置**，峰值
+		 * 再高也只占最高那一档。
+		 *
+		 * 只有三个边界 P25/P50/P75，对应 L1..L4：四档需要三个切点。若再切一个 P90，
+		 * (P75, P90] 与 (P90, max] 会落进同一档——那是死代码，不是更细的分辨率。
+		 *
+		 * `v === max` 的短路是**尺度保证**，不是优化：最高的活跃日必须是 L4。否则只有
+		 * 一天有记录的用户会看到那一格是最浅档（P75 恰好等于该值，落进 L1），明显是
+		 * 错的。有了它，n=1/2/3 不需要任何「小样本退化」特例，也不会除零。
+		 *
+		 * 边界用「小于等于」比较：分位点相等（大量重复值，例如每天都是 100）时全部
+		 * 落进最高档，既不崩也不塌成随机色，且仍满足「最忙的一天是 L4」。
+		 *
+		 * @param activity - `[{tokens}]`；0 token 的日子不参与分位。
+		 * @returns `(tokens) => 0..4` 的纯函数。
+		 */
+		function makeLevelScale(activity) {
+			const active = (activity ?? [])
+				.map((row) => row?.tokens ?? 0)
+				.filter((tokens) => typeof tokens === "number" && Number.isFinite(tokens) && tokens > 0)
+				.sort((a, b) => a - b);
+			const max = active.length === 0 ? 0 : active[active.length - 1];
+			const cuts = active.length === 0 ? [] : [quantile(active, 0.25), quantile(active, 0.5), quantile(active, 0.75)];
+			return (tokens) => {
+				if (typeof tokens !== "number" || !Number.isFinite(tokens) || tokens <= 0) return 0;
+				if (tokens >= max) return 4;
+				let level = 1;
+				for (const cut of cuts) {
+					if (tokens > cut) level += 1;
+				}
+				return Math.min(4, level);
+			};
+		}
+
+		/**
+		 * 取一行里某一列的数值，非数值一律算缺失（null）。
+		 *
+		 * @param row - 数据行。
+		 * @param key - 列键。
+		 * @returns 数值或 null。
+		 */
+		function valueOf(row, key) {
+			const value = row?.[key];
+			return typeof value === "number" && Number.isFinite(value) ? value : null;
+		}
+
+		/**
+		 * 按列与方向排序，缺失值恒排最后。
+		 *
+		 * 「缺失」不能当成 0：未定价的模型 cost 是 null，当成 0 会让它随升降序在
+		 * 沉底与顶头之间跳——它根本不该参与数值比较，任何方向都排最后。
+		 *
+		 * @param rows - 数据行数组。
+		 * @param key - 排序键。
+		 * @param direction - `"asc" | "desc"`。
+		 * @returns 排好序的新数组（不改原数组）。
+		 */
+		function sortRows(rows, key, direction) {
+			const sign = direction === "asc" ? 1 : -1;
+			return [...rows].sort((a, b) => {
+				const left = valueOf(a, key);
+				const right = valueOf(b, key);
+				if (left === null && right === null) return 0;
+				if (left === null) return 1;
+				if (right === null) return -1;
+				if (left === right) return 0;
+				return left < right ? -sign : sign;
+			});
+		}
+
+		//#endregion
+
 		//#region 组件
 
 		/**
@@ -323,20 +472,8 @@ window.__ModuleLoader__.load({
 			}
 			while (cells.length % 7 !== 0) cells.push(null);
 
-			const max = Math.max(1, ...(activity ?? []).map((row) => row.tokens ?? 0));
-			const level = (tokens) => {
-				if (!tokens) return 0;
-				const ratio = tokens / max;
-				if (ratio > 0.66) return 4;
-				if (ratio > 0.33) return 3;
-				if (ratio > 0.1) return 2;
-				return 1;
-			};
-			const shade = (value) => {
-				if (value === 0) return "var(--dsw-alias-bg-layer-2, rgba(255,255,255,.06))";
-				const alpha = [0, 0.28, 0.48, 0.7, 1][value];
-				return `color-mix(in srgb, var(--dsw-alias-brand-primary,#4ea1ff) ${Math.round(alpha * 100)}%, transparent)`;
-			};
+			// 档位边界只由活跃日的分位数决定，与全窗口峰值无关：一个峰值压不平一整年。
+			const level = makeLevelScale(activity);
 
 			const weeks = cells.length / 7;
 			const monthLabels = [];
@@ -375,14 +512,16 @@ window.__ModuleLoader__.load({
 								const row = day === null ? undefined : byDay.get(day);
 								const tokens = row?.tokens ?? 0;
 								const tip = day === null ? "" : `${day}　${fmtTokens(tokens)} tokens　${fmtCount(row?.requests ?? 0)} 次请求`;
-								return h("i", { key: index, title: tip, style: day === null ? { visibility: "hidden" } : { background: shade(level(tokens)) } });
+								// 档位只写进 `data-l`，颜色交给 CSS 按主题给——单元格不再自己算色值。
+								return h("i", { key: index, title: tip, "data-l": String(level(tokens)), style: day === null ? { visibility: "hidden" } : {} });
 							}),
 						),
 						h(
 							"div",
 							{ className: "ul-legend" },
 							h("span", null, "少"),
-							[0, 1, 2, 3, 4].map((value) => h("i", { key: value, style: { background: shade(value) } })),
+							// 图例色块与真实格子走同一套 `data-l`，保证两者颜色永远一致。
+							[0, 1, 2, 3, 4].map((value) => h("i", { key: value, "data-l": String(value) })),
 							h("span", null, "多"),
 							h("span", { className: "ul-muted", style: { marginLeft: "8px" } }, `UTC${(timeZone?.offset ?? 0) >= 0 ? "+" : ""}${timeZone?.offset ?? 0}`),
 						),
@@ -439,12 +578,13 @@ window.__ModuleLoader__.load({
 		/**
 		 * 可排序明细表。
 		 *
-		 * @param props - `{rows, columns, nameOf, currency, sortKey, onSort}`。
+		 * @param props - `{rows, columns, nameOf, currency, sort, onSort}`；`sort` 是
+		 *   `{key, direction}`，`onSort(key)` 由面板决定「切方向还是换列」。
 		 * @returns 表格节点。
 		 */
-		function DetailTable({ rows, columns, nameOf, currency, sortKey, onSort }) {
+		function DetailTable({ rows, columns, nameOf, currency, sort, onSort }) {
 			const max = Math.max(1, ...rows.map((row) => row.tokens ?? 0));
-			return h(
+			const table = h(
 				"table",
 				{ className: "ul-table" },
 				h(
@@ -453,13 +593,33 @@ window.__ModuleLoader__.load({
 					h(
 						"tr",
 						null,
-						columns.map((column) =>
-							h(
+						columns.map((column) => {
+							// 「名称」列不可排序：它既不是数值、也不该装成能排。
+							// 一个点了不改变行序的表头就是在说谎，所以这里连箭头都不给。
+							if (column.sortable === false) return h("th", { key: column.key, scope: "col" }, column.label);
+							const active = sort.key === column.key;
+							return h(
 								"th",
-								{ key: column.key, onClick: () => onSort(column.key), title: "点击排序" },
-								column.label + (sortKey === column.key ? " ↓" : ""),
-							),
-						),
+								{
+									key: column.key,
+									scope: "col",
+									// aria-sort 只描述**这一列当前**的排序方向；未激活的列一律 none。
+									"aria-sort": active ? (sort.direction === "asc" ? "ascending" : "descending") : "none",
+								},
+								h(
+									"button",
+									{
+										type: "button",
+										className: "ul-sort",
+										title: "点击排序",
+										onClick: () => onSort(column.key),
+									},
+									column.label,
+									// 箭头必须反映真实方向，不能无条件拼 ↓。
+									active ? h("span", { className: "ul-arrow" }, sort.direction === "asc" ? " ↑" : " ↓") : null,
+								),
+							);
+						}),
 					),
 				),
 				h(
@@ -481,6 +641,9 @@ window.__ModuleLoader__.load({
 					),
 				),
 			);
+			// 表格自己横向滚动。以前 `overflow:auto` 在 `.ul-panel` 上，表格一超宽就把
+			// 表头、范围标签、卡片一起推走——整块面板都在滑。现在只有表格内部滑。
+			return h("div", { className: "ul-tablewrap" }, table);
 		}
 
 		/**
@@ -515,6 +678,7 @@ window.__ModuleLoader__.load({
 		/**
 		 * 面板主体。
 		 *
+		 * @param props - `{onClose}`。
 		 * @returns 面板节点。
 		 */
 		function Panel({ onClose }) {
@@ -524,8 +688,15 @@ window.__ModuleLoader__.load({
 			const [kind, setKind] = useState(initial.current.kind);
 			const [from, setFrom] = useState(initial.current.from);
 			const [to, setTo] = useState(initial.current.to);
-			const [sort, setSort] = useState({ models: "tokens", providers: "tokens" });
+			// 排序状态是 `{key, direction}` 而不是单个 key：没有方向就没有升降序，
+			// 箭头也就无从谈起。两张表各存一份，互不影响。
+			const [sort, setSort] = useState({
+				models: { key: "tokens", direction: "desc" },
+				providers: { key: "tokens", direction: "desc" },
+			});
 			const { data, error, loading, stale, reload } = useUsage({ kind, from, to });
+			// 打开面板时焦点必须进得来，否则键盘用户根本到不了里面。
+			const panelRef = useRef(null);
 
 			// 每次范围变化都记下来。
 			useEffect(() => {
@@ -535,9 +706,29 @@ window.__ModuleLoader__.load({
 			// 面板开着的时候让数字自己跟上，不用手动点刷新。
 			useAutoRefresh(`${kind}:${from}:${to}`, useCallback(() => reload(), [reload]));
 
-			const sortRows = (rows, key) => [...rows].sort((a, b) => (b[key] ?? 0) - (a[key] ?? 0));
-			const providerRows = data === null ? [] : sortRows(data.providers ?? [], sort.providers);
-			const modelRows = data === null ? [] : sortRows(data.models ?? [], sort.models);
+			useEffect(() => {
+				panelRef.current?.focus();
+			}, []);
+
+			/**
+			 * 点表头：同一列切换方向，换一列则从 desc 重新开始。
+			 *
+			 * 数值列默认降序是刻意的——「谁最多」才是打开表格时最想问的问题；
+			 * 但一旦用户已经点过某一列，就不该再替他改方向。
+			 *
+			 * @param which - `"models" | "providers"`。
+			 * @param key - 被点击的列键。
+			 */
+			const toggleSort = (which, key) => {
+				setSort((prev) => {
+					const current = prev[which];
+					if (current.key === key) return { ...prev, [which]: { key, direction: current.direction === "desc" ? "asc" : "desc" } };
+					return { ...prev, [which]: { key, direction: "desc" } };
+				});
+			};
+
+			const providerRows = data === null ? [] : sortRows(data.providers ?? [], sort.providers.key, sort.providers.direction);
+			const modelRows = data === null ? [] : sortRows(data.models ?? [], sort.models.key, sort.models.direction);
 
 			const tabs = [
 				["today", "今日"],
@@ -548,12 +739,16 @@ window.__ModuleLoader__.load({
 			];
 
 			const columns = [
-				{ key: "name", label: "名称" },
+				// 名称列 sortable:false —— 见 DetailTable：不渲染成按钮、无箭头、无 title。
+				{ key: "name", label: "名称", sortable: false },
 				{ key: "tokens", label: "tokens", render: (row, max) =>
 					h("div", { style: { display: "flex", gap: "6px", alignItems: "center", justifyContent: "flex-end" } },
-						h("div", { className: "ul-bar", style: { flex: "1 1 auto", maxWidth: "90px" } },
+						// 进度条允许收缩：它是纯装饰，撑宽列只会把表格挤出面板。
+						h("div", { className: "ul-bar", style: { flex: "1 1 44px", minWidth: 0, maxWidth: "90px" } },
 							h("span", { style: { width: `${Math.max(2, Math.round(((row.tokens ?? 0) / max) * 100))}%` } })),
-						h("span", { style: { minWidth: "76px", textAlign: "right" } }, fmtTokens(row.tokens))) },
+						// 这里原本有个 76px 的硬下限，正是表格 min-content ≈837px 超出面板内宽
+						// 728px 的主因；数值列按内容定宽即可。
+						h("span", { className: "ul-num" }, fmtTokens(row.tokens))) },
 				{ key: "requests", label: "请求", render: (row) => fmtCount(row.requests) },
 				{ key: "inputTokens", label: "输入", render: (row) => fmtTokens(row.inputTokens) },
 				{ key: "outputTokens", label: "输出", render: (row) => fmtTokens(row.outputTokens) },
@@ -563,13 +758,33 @@ window.__ModuleLoader__.load({
 				{ key: "cost", label: "官方价折算", render: (row, _max, currency) => (row.cost === null || row.cost === undefined ? h("span", { className: "ul-muted" }, "—") : fmtMoney(row.cost, currency)) },
 			];
 
+			// Esc 的监听器挂在面板上而不是 window 上：面板外的按键不该被这里吃掉。
+			// 日期输入框也在面板内，Esc 在输入框里同样关闭——这与宿主其它对话框一致。
+			const onKeyDown = (event) => {
+				if (event.key === "Escape") {
+					event.stopPropagation();
+					onClose();
+				}
+			};
+
 			return h(
 				"div",
 				{ className: "ul-root" },
-				h("div", { className: "ul-backdrop", onClick: onClose }),
+				// 遮罩只负责视觉与点击关闭，对辅助技术隐藏——它不是内容，× 与 Esc 才是
+				// 正经的关闭途径，遮罩不再是唯一出口。
+				h("div", { className: "ul-backdrop", "aria-hidden": "true", onClick: onClose }),
 				h(
 					"div",
-					{ className: "ul-panel" },
+					{
+						className: "ul-panel",
+						role: "dialog",
+						"aria-modal": "true",
+						"aria-label": "用量账本",
+						// tabIndex:-1 让容器可被程序化聚焦，但不进入 Tab 顺序。
+						tabIndex: -1,
+						ref: panelRef,
+						onKeyDown,
+					},
 					h(
 						"div",
 						{ className: "ul-head" },
@@ -618,8 +833,8 @@ window.__ModuleLoader__.load({
 											columns,
 											nameOf: (row) => row.provider,
 											currency: data.cost?.currency,
-											sortKey: sort.providers,
-											onSort: (key) => setSort((prev) => ({ ...prev, providers: key })),
+											sort: sort.providers,
+											onSort: (key) => toggleSort("providers", key),
 										}),
 									),
 									h(
@@ -631,8 +846,8 @@ window.__ModuleLoader__.load({
 											columns,
 											nameOf: (row) => row.model,
 											currency: data.cost?.currency,
-											sortKey: sort.models,
-											onSort: (key) => setSort((prev) => ({ ...prev, models: key })),
+											sort: sort.models,
+											onSort: (key) => toggleSort("models", key),
 										}),
 									),
 									data.cost?.priced !== true || (data.cost?.unpriced ?? []).length > 0
@@ -677,6 +892,8 @@ window.__ModuleLoader__.load({
 			const [open, setOpen] = useState(false);
 			const [today, setToday] = useState(() => usageCache.get("range=today") ?? null);
 			const mounted = useRef(true);
+			// 关闭后焦点要归还给徽章，否则键盘用户会被扔回页面顶部。
+			const badgeRef = useRef(null);
 
 			/**
 			 * 取今日用量，并把用户上次选择的范围也一并预热。
@@ -722,12 +939,22 @@ window.__ModuleLoader__.load({
 				{ className: "ul-root" },
 				h(
 					"button",
-					{ className: "ul-badge", onClick: () => setOpen((value) => !value), title: "用量账本（本地会话日志统计）" },
+					{ className: "ul-badge", ref: badgeRef, onClick: () => setOpen((value) => !value), title: "用量账本（本地会话日志统计）" },
 					h("span", { className: "dot" }),
 					h("span", { className: "t" }, "用量账本"),
 					h("span", { className: "n" }, today === null ? "…" : fmtTokens(today.totals?.tokens ?? 0)),
 				),
-				open ? h(Panel, { onClose: () => setOpen(false) }) : null,
+				// 关闭路径统一走这里：归还焦点。徽章按钮上再点一次会关闭面板，而那时
+				// 焦点本来就在徽章上，再 focus 一次是幂等的，所以两条路径共用一个函数。
+				open
+					? h(Panel, {
+							onClose: () => {
+								setOpen(false);
+								// 面板因整个组件卸载而关闭时 `current` 是 null，可选链挡住它。
+								badgeRef.current?.focus();
+							},
+						})
+					: null,
 			);
 		}
 
