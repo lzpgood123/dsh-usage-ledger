@@ -11,7 +11,7 @@
  *    "data":{"message":{"source":{"provider":"example-relay","model":"deepseek-v4.1-flash"}},
  *            "usage":{"inputTokens":1896,"outputTokens":321,"cacheReadTokens":8960}}}
  *
- * 因此「分供应商、分模型、按时间」全部可以从本地记录直接算出，不需要任何网络
+ * 因此「分渠道、分模型、按时间」全部可以从本地记录直接算出，不需要任何网络
  * 请求、凭据或中转站归属推断。
  *
  * ## 为什么逐帧解压
@@ -388,7 +388,7 @@ function withRate(bucket) {
  *
  * @param records - 全部计费记录。
  * @param range - `{from, to}`，`YYYY-MM-DD` 闭区间；`null` 表示不设边界。
- * @returns 汇总结果：总计、按天、按供应商、按模型。
+ * @returns 汇总结果：总计、按天、按渠道、按模型。
  */
 export function aggregate(records, range = {}) {
 	const { from = null, to = null } = range;

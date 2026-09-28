@@ -177,7 +177,7 @@ export function buildPayload(records, options = {}) {
 	});
 
 	const providers = scoped.providers.map((row) => {
-		// 供应商成本按它名下各模型相加，逐模型判定是否定价。
+		// 渠道成本按它名下各模型相加，逐模型判定是否定价。
 		let sum = 0;
 		let any = false;
 		for (const model of scoped.models) {
@@ -416,7 +416,7 @@ export function apply(ctx, config = {}) {
 				() =>
 					commands.register({
 						name: "usage",
-						description: "本地会话日志的 token 用量（分供应商、分模型）",
+						description: "本地会话日志的 token 用量（分渠道、分模型）",
 						input: { hint: "[today|week|month|all]" },
 						handler: async (invocation) => {
 							try {

@@ -437,7 +437,7 @@ window.__ModuleLoader__.load({
 					"div",
 					null,
 					`未定价：${unpriced.length} 个模型，占 ${share}% 的 token 量`,
-					share >= 20 ? "　—— 当前费用偏低，仅供参考" : "",
+					share >= 20 ? "　—— 官方价折算偏低，仅供参考" : "",
 				),
 				h(
 					"div",
@@ -507,14 +507,14 @@ window.__ModuleLoader__.load({
 		 */
 		function SummaryCards({ totals, cost, currency }) {
 			const cards = [
-				["总 tokens", fmtTokens(totals.tokens)],
+				["消耗总量", fmtTokens(totals.tokens)],
 				["请求", fmtCount(totals.requests)],
 				["输入", fmtTokens(totals.inputTokens)],
 				["输出", fmtTokens(totals.outputTokens)],
 				["缓存读", fmtTokens(totals.cacheReadTokens)],
 				["缓存写", fmtTokens(totals.cacheWriteTokens)],
 				["推理", fmtTokens(totals.reasoningTokens)],
-				["缓存命中", `${totals.cacheHitRate ?? 0}%`],
+				["缓存命中率", `${totals.cacheHitRate ?? 0}%`],
 				// 标签刻意写「官方价折算」而不是「费用」：这个数字与真实账单无关，
 				// 它是把 token 量按各家官方挂牌价折算出来的**消耗程度**。用户实际
 				// 走的是中转站（有折扣、积分、免费额度），真实扣款通常低于此值。
@@ -628,7 +628,7 @@ window.__ModuleLoader__.load({
 									h(
 										"div",
 										{ className: "ul-sec" },
-										h("h4", null, "分供应商", h("span", { className: "hint" }, `${providerRows.length} 个`)),
+										h("h4", null, "分渠道", h("span", { className: "hint" }, `${providerRows.length} 个`)),
 										h(DetailTable, {
 											rows: providerRows,
 											columns,
