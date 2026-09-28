@@ -320,10 +320,16 @@ function parseTap(output) {
 	// **套件**不进去：它只让 `# tests` 变少、`# suites` 变多，`# skipped` 仍是 0。
 	// 所以额外数一遍 TAP 结果行上的 `# SKIP` 指令——用例级与套件级的跳过都会留下它。
 	// 只认 `ok/not ok N - 名称 ... # SKIP` 这种结果行（允许前导缩进，嵌套套件会有），
-	// 不去全文搜 `# SKIP`：那会被失败日志或用例名里的同样字样误伤。
+	// 不去全文搜 `# SKIP`：那会被失败日志里的同样字样误伤。
+	//
+	// 光锚定结果行还不够——**用例名本身**就可能写着 `# SKIP`。好在 Node 的 TAP 会把
+	// 用例名里的 `#` 转义成 `\#`（实测 Node 24.19.0：`test("… # SKIP …")` 输出
+	// `ok 1 - … \# SKIP …`），所以用负向后顾 `(?<!\\)` 排除被转义的井号，就只会数到
+	// TAP 自己追加的、真正的 `# SKIP` 指令（前面是空格而非反斜杠）。
+	//
 	// 实测（Node 24.19.0）：整个文件包进 `describe.skip` → `# tests 0 / # skipped 0`；
 	// 7 个文件里只跳过 1 个 → `# tests 93 / # skipped 0`，两种都逃过只看 `skipped` 的守卫。
-	const skips = [...output.matchAll(/^[ \t]*(?:not )?ok \d+ - .*# SKIP\b/gm)].length;
+	const skips = [...output.matchAll(/^[ \t]*(?:not )?ok \d+ - .*(?<!\\)# SKIP\b/gm)].length;
 	return {
 		tests: summary("tests"),
 		pass: summary("pass"),
@@ -359,16 +365,20 @@ function runTests(repoDir, files) {
  * 用例没运行而全绿通过，最终被判成 SURVIVED（脚本报「这条行为无人看守」，而事实是
  * 用例根本没跑）。实测（Node 24.19.0）：
  *
- * 1. **整批用例被跳过**（例如把整个文件包进 `describe.skip`）：TAP 报
- *    `# tests 0 / # pass 0 / # fail 0 / # skipped 0`，退出码 0。只看 `skipped`
- *    的守卫完全看不见它——`skipped === 0` 反而成了「什么都没跑」的通行证。
- * 2. **只跳过一个文件**（7 个文件里跳过 1 个）：TAP 报 `# tests 93 / # skipped 0`，
- *    退出码 0。用例数不为 0，所以连 `tests === 0` 也看不见，必须靠 `# SKIP` 指令数。
+ * 1. **套件级跳过**（`describe.skip` 整个套件，或整个文件）：TAP 会留下
+ *    `# SKIP` 指令，但汇总行 `# skipped` 是 0——它只数被 `t.skip()` 的**用例**，
+ *    跳过的**套件**不进这个数。只看 `skipped` 的守卫完全看不见它。
+ *    用例数也未必为 0：实测 7 个文件里只跳过 1 个时 TAP 报 `# tests 93 / # skipped 0`，
+ *    连 `tests === 0` 都看不见，只有数 `# SKIP` 指令这一条能拦住。
+ * 2. **一条用例都没跑**（空 `describe`，即文件根本没声明用例）：TAP 报
+ *    `# tests 0 / # skipped 0 / 且没有任何 # SKIP 痕迹`，退出码 0。
+ *    这种情况连 `# SKIP` 都没有，只有 `tests === 0` 这一条能看见——所以这个分支
+ *    **不是死代码**，实测可达（空 `describe` 即命中）。
  * 3. **用例级 `t.skip()`**（宿主主题包缺失时 appearance 的 16 条）：TAP 报
  *    `# skipped 16`，退出码 0——这条是原先的守卫已经覆盖的。
  *
- * `# skipped` 汇总行只数被 `t.skip()` 的**用例**，`describe.skip()` 跳过的**套件**
- * 不进这个数，所以第 1、2 种情况要用 TAP 的 `# SKIP` 指令去数。
+ * 判定按「能给出最准确原因」的顺序排列：先套件级（有 `# SKIP` 痕迹），再
+ * `tests === 0`，最后用例级 `skipped`。三者互不重叠，任一命中都足以拒绝继续。
  *
  * @param tap - {@link parseTap} 的结果。
  * @returns 不可信的原因（可直接放进报错/日志）；一切正常时为 `null`。
@@ -381,7 +391,8 @@ function untrustworthyRun(tap) {
 		return `TAP 里有 ${tap.skips} 处 \`# SKIP\`（被跳过的用例或整个套件），但汇总行 \`# skipped\` 是 0：有测试被 \`describe.skip\` 之类的套件级跳过静默跳过了`;
 	}
 	if (tap.tests === 0) {
-		return "TAP 汇总显示 0 条用例被执行：整批用例被整体跳过（或压根没跑起来），此时 `skipped === 0` 毫无意义";
+		// 空 `describe`（没有声明任何用例）走这里：tests 0、skipped 0、也没有 `# SKIP`。
+		return "TAP 汇总显示 0 条用例被执行：整批用例被整体跳过，或测试文件其实没声明任何用例，此时 `skipped === 0` 毫无意义";
 	}
 	if (tap.skipped !== 0) {
 		return `${tap.skipped} 条用例被 skip`;
@@ -467,8 +478,9 @@ async function main() {
 				`基线不可信：${baselineUntrusted}。` +
 					"被跳过的用例没有运行，变异体本该变红却会全绿通过，从而被误判成 SURVIVED（假警报——报告说「无人看守」，实则是没跑）。" +
 					"skip 本身不会让 `node --test` 非 0 退出（实测退出码为 0），所以这里必须硬断言，脚本拒绝在这种环境下继续。" +
-					"\n  最常见的原因：宿主主题包没装上（test/appearance.test.js 读不到就只能 skip），" +
-					"或有人把整个测试文件包进了 `describe.skip`。",
+					"\n  最常见的原因：宿主主题包没装上（test/appearance.test.js 读不到就只能 skip）、" +
+					"有人把整个测试文件包进了 `describe.skip`，或某个测试文件其实没有声明任何用例" +
+					"（空 `describe` 会让 TAP 报 `# tests 0 / # skipped 0`，只有 `tests === 0` 这一条能看见）。",
 			);
 		}
 

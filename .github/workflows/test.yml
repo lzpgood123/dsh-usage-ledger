@@ -69,14 +69,19 @@ jobs:
       # 那里 Chrome 缺失才算失败。
       #
       # 为什么不用 `node --test "test/**/*.test.js" "!test/viewport.test.js"`：
-      # 已实测 Node 24 **不支持** glob 否定，那个 `!...` 参数被静默忽略，104 个用例
-      # 照跑不误（含 viewport），闸门于是仍会被误杀。所以这里用 shell 算出显式列表。
+      # 已实测 Node 24 **不支持** glob 否定，那个 `!...` 参数被静默忽略，viewport
+      # 照跑不误，闸门于是仍会被误杀。所以这里用 shell 算出显式列表。
+      # 这里刻意不写死用例数：它随每次加测试而漂移，同一处已经改过三次。
       #
       # 列表算空时必须**显式失败**：`node --test` 在拿不到任何文件参数时会退回自己的
-      # 默认发现，递归跑遍整个 `test/`——实测 116 个用例，其中就包含
-      # test/viewport.test.js。那等于把浏览器用例偷偷搬回主 job，绕过「viewport 独立
-      # job、主 job 不受 Chrome 缺失影响」的设计，而且下面的 skipped 闸门看不出来
-      # （116 个用例全绿）。`ls` 出错（例如 test/ 被改名）同样落进这条检查。
+      # 默认发现，递归跑遍整个 `test/`，其中就包含 test/viewport.test.js——连 `test/`
+      # 下的辅助模块（fixtures.js、memory-source.js、client-harness.js）也会被当成
+      # 测试跑一遍。那等于把浏览器用例偷偷搬回主 job，绕过「viewport 独立 job、主 job
+      # 不受 Chrome 缺失影响」的设计；而下面的 skipped 闸门看不出来：CI runner 上
+      # Chrome 是在的，那批用例会真跑且全绿（要等到某天 runner 没 Chrome 才会以
+      # 「viewport 被 skip」的形式暴露，届时排查方向已经错了）。`ls` 出错（例如
+      # test/ 被改名）同样落进这条检查。
+      # 同理，默认发现的用例数也不写死：它比显式列表多出 viewport 与上述辅助模块。
       - name: 跑测试（并导出 TAP 报告）
         run: |
           FILES="$(ls test/*.test.js | grep -v 'test/viewport.test.js$' | tr '\n' ' ')"
