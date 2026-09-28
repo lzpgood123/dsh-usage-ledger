@@ -802,6 +802,9 @@ body[data-ds-dark-theme] .ul-heat i[data-l="4"],body[data-ds-dark-theme] .ul-leg
 				{ key: "inputTokens", label: "输入", render: (row) => fmtTokens(row.inputTokens) },
 				{ key: "outputTokens", label: "输出", render: (row) => fmtTokens(row.outputTokens) },
 				{ key: "cacheReadTokens", label: "缓存读", render: (row) => fmtTokens(row.cacheReadTokens) },
+				// 「缓存写」紧跟「缓存读」，与汇总卡片（SummaryCards）的口径和顺序一致：
+				// 同一个数字在卡片里有、在明细表里却找不到，会让人以为表格漏算了。
+				{ key: "cacheWriteTokens", label: "缓存写", render: (row) => fmtTokens(row.cacheWriteTokens) },
 				{ key: "reasoningTokens", label: "推理", render: (row) => fmtTokens(row.reasoningTokens) },
 				{ key: "cacheHitRate", label: "命中", render: (row) => `${row.cacheHitRate ?? 0}%` },
 				{ key: "cost", label: "官方价折算", render: (row, _max, currency) => (row.cost === null || row.cost === undefined ? h("span", { className: "ul-muted" }, "—") : fmtMoney(row.cost, currency)) },

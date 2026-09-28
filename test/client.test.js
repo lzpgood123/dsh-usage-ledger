@@ -709,6 +709,46 @@ test("名称列不装成可排序：不是按钮、没有 aria-sort、没有箭�
 	}
 });
 
+test("明细表有「缓存写」列且紧跟「缓存读」，单元格取自行数据（#3）", async (t) => {
+	const payload = payloadWithRows();
+	// 行内数值刻意与合计（400）错开，且每行不同：这样「列读了 row.cacheWriteTokens
+	// 还是误读了 totals.cacheWriteTokens」以及「列错位读了相邻行」都会被抓到。
+	payload.providers[0].cacheWriteTokens = 4321;
+	payload.providers[1].cacheWriteTokens = 765;
+	payload.models[0].cacheWriteTokens = 4321;
+	payload.models[1].cacheWriteTokens = 765;
+	/** 行名 → 该行「缓存写」应显示的文本。行序按 tokens 降序，与这里无关。 */
+	const expectedByRow = new Map([
+		["alpha", "4,321"],
+		["beta", "765"],
+		["m-one", "4,321"],
+		["m-two", "765"],
+	]);
+	const { render } = await renderInteractive(t, payload, "Panel", { onClose: () => {} });
+	const node = render();
+
+	const tables = findAllByClass(node, "ul-table");
+	assert.equal(tables.length, 2, "分渠道与分模型各一张表");
+
+	for (const table of tables) {
+		const headers = findAll(table, (element) => element.type === "th").map((element) => textOf(element));
+		const read = headers.indexOf("缓存读");
+		assert.ok(read >= 0, `表头里没有「缓存读」：${headers.join(" / ")}`);
+		// 位置而不是「有没有」：插到表尾虽然也在，但和汇总卡片的顺序就对不上了。
+		assert.equal(headers[read + 1], "缓存写", `「缓存写」必须紧跟「缓存读」，实际表头顺序：${headers.join(" / ")}`);
+
+		// 表头只是承诺。列头在、单元格却没渲染（或渲染错列）同样是坏的，所以逐行钉住
+		// 该列文本：单元格与表头一一对应，下标可直接复用。
+		const rows = findAll(table, (element) => element.type === "tr").slice(1);
+		assert.equal(rows.length, 2, "每张表两行明细");
+		for (const row of rows) {
+			const cells = findAll(row, (element) => element.type === "td").map((element) => textOf(element));
+			const name = cells[0];
+			assert.equal(cells[read + 1], expectedByRow.get(name), `行「${name}」的缓存写单元格应取自行数据，实际整行：${cells.join(" / ")}`);
+		}
+	}
+});
+
 test("点同一列表头切换升降序，换一列则从降序重新开始（排序状态真的会变）", async (t) => {
 	const { render } = await renderInteractive(t, payloadWithRows(), "Panel", { onClose: () => {} });
 
