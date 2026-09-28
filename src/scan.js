@@ -5,7 +5,7 @@
  *
  *   $DSH_HOME/sessions/<cwd 编码>/session-<uuid>/session.v4.jsonl.zstd
  *
- * 每条 `assistant/message` 事件同时携带**计费用量**与**实际服务该请求的路由**：
+ * 每条 `assistant/message` 事件同时携带**计费用量**与**实际服务该请求的渠道**：
  *
  *   {"type":"assistant/message","time":1790516405452,
  *    "data":{"message":{"source":{"provider":"example-relay","model":"deepseek-v4.1-flash"}},

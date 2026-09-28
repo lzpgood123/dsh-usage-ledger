@@ -4,7 +4,7 @@
  * 职责只有三件：扫描本地会话日志、按范围聚合、把结果交给浏览器。
  *
  * 设计上刻意**不碰网络、不读凭据、不做中转站归属推断**——数据源本身就是
- * 权威的：每条 `assistant/message` 都带着计费用量和实际服务该请求的路由。
+ * 权威的：每条 `assistant/message` 都带着计费用量和实际服务该请求的渠道。
  * 这消除了前一版插件依赖宿主 `settings.get(ns)` 才发现不了中转站的那类问题。
  *
  * @module usage-ledger
@@ -86,7 +86,7 @@ export function resolveRange(kind, from, to, now = new Date()) {
 }
 
 /**
- * 按价格表估算一个桶的费用。
+ * 按价格表估算一个桶的金额。
  *
  * 价格表按**每百万 token** 计价，键为模型 id。缺少该模型价格时返回
  * `undefined`——宁可不显示，也不拿 0 冒充「免费」。
@@ -424,7 +424,7 @@ export function apply(ctx, config = {}) {
 								const { records, stats } = await scan();
 								const payload = buildPayload(records, { range, pricing, aliases, rates, currency, stats });
 								const lines = [
-									`用量 ${range.label}｜tokens ${payload.totals.tokens.toLocaleString()}｜请求 ${payload.totals.requests}｜缓存命中 ${payload.totals.cacheHitRate}%`,
+									`用量 ${range.label}｜tokens ${payload.totals.tokens.toLocaleString()}｜请求 ${payload.totals.requests}｜缓存命中率 ${payload.totals.cacheHitRate}%`,
 									"",
 									...payload.providers.map((row) => `${row.provider.padEnd(18)} ${row.tokens.toLocaleString().padStart(16)}  请求 ${row.requests}`),
 								];
