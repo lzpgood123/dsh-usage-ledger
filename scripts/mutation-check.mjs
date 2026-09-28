@@ -308,7 +308,7 @@ async function testFiles(repoDir) {
  * 解析 TAP 汇总与失败用例名。
  *
  * @param output - `node --test --test-reporter=tap` 的 stdout。
- * @returns `{tests, pass, fail, skipped, failedNames}`。
+ * @returns `{tests, pass, fail, skipped, skips, failedNames}`。
  */
 function parseTap(output) {
 	const summary = (key) => {
@@ -316,11 +316,20 @@ function parseTap(output) {
 		return matches.length === 0 ? null : Number(matches[matches.length - 1][1]);
 	};
 	const failedNames = [...output.matchAll(/^not ok \d+ - (.+)$/gm)].map((match) => match[1]);
+	// 汇总行的 `# skipped` **只数被 `t.skip()` 的用例**。被 `describe.skip()` 整体跳过的
+	// **套件**不进去：它只让 `# tests` 变少、`# suites` 变多，`# skipped` 仍是 0。
+	// 所以额外数一遍 TAP 结果行上的 `# SKIP` 指令——用例级与套件级的跳过都会留下它。
+	// 只认 `ok/not ok N - 名称 ... # SKIP` 这种结果行（允许前导缩进，嵌套套件会有），
+	// 不去全文搜 `# SKIP`：那会被失败日志或用例名里的同样字样误伤。
+	// 实测（Node 24.19.0）：整个文件包进 `describe.skip` → `# tests 0 / # skipped 0`；
+	// 7 个文件里只跳过 1 个 → `# tests 93 / # skipped 0`，两种都逃过只看 `skipped` 的守卫。
+	const skips = [...output.matchAll(/^[ \t]*(?:not )?ok \d+ - .*# SKIP\b/gm)].length;
 	return {
 		tests: summary("tests"),
 		pass: summary("pass"),
 		fail: summary("fail"),
 		skipped: summary("skipped"),
+		skips,
 		failedNames,
 	};
 }
@@ -341,6 +350,43 @@ function runTests(repoDir, files) {
 	});
 	const output = `${result.stdout ?? ""}\n${result.stderr ?? ""}`;
 	return { status: result.status, signal: result.signal, output, tap: parseTap(output) };
+}
+
+/**
+ * 判断一次测试运行是否「不可信」——即有没有用例被静默跳过。
+ *
+ * 三种退化都必须挡住，因为它们的共同后果是：变异体本该让测试变红，却因为守它的
+ * 用例没运行而全绿通过，最终被判成 SURVIVED（脚本报「这条行为无人看守」，而事实是
+ * 用例根本没跑）。实测（Node 24.19.0）：
+ *
+ * 1. **整批用例被跳过**（例如把整个文件包进 `describe.skip`）：TAP 报
+ *    `# tests 0 / # pass 0 / # fail 0 / # skipped 0`，退出码 0。只看 `skipped`
+ *    的守卫完全看不见它——`skipped === 0` 反而成了「什么都没跑」的通行证。
+ * 2. **只跳过一个文件**（7 个文件里跳过 1 个）：TAP 报 `# tests 93 / # skipped 0`，
+ *    退出码 0。用例数不为 0，所以连 `tests === 0` 也看不见，必须靠 `# SKIP` 指令数。
+ * 3. **用例级 `t.skip()`**（宿主主题包缺失时 appearance 的 16 条）：TAP 报
+ *    `# skipped 16`，退出码 0——这条是原先的守卫已经覆盖的。
+ *
+ * `# skipped` 汇总行只数被 `t.skip()` 的**用例**，`describe.skip()` 跳过的**套件**
+ * 不进这个数，所以第 1、2 种情况要用 TAP 的 `# SKIP` 指令去数。
+ *
+ * @param tap - {@link parseTap} 的结果。
+ * @returns 不可信的原因（可直接放进报错/日志）；一切正常时为 `null`。
+ */
+function untrustworthyRun(tap) {
+	if (tap.skips !== 0 && tap.skipped === 0) {
+		// 套件级跳过：`# SKIP` 有痕迹，但 `# skipped` 汇总为 0。整文件 describe.skip
+		// 时 tests 可能为 0，也可能只是变少（取决于还有几个文件在跑），所以这条
+		// 检查不依赖 tests 的具体值。
+		return `TAP 里有 ${tap.skips} 处 \`# SKIP\`（被跳过的用例或整个套件），但汇总行 \`# skipped\` 是 0：有测试被 \`describe.skip\` 之类的套件级跳过静默跳过了`;
+	}
+	if (tap.tests === 0) {
+		return "TAP 汇总显示 0 条用例被执行：整批用例被整体跳过（或压根没跑起来），此时 `skipped === 0` 毫无意义";
+	}
+	if (tap.skipped !== 0) {
+		return `${tap.skipped} 条用例被 skip`;
+	}
+	return null;
 }
 
 /**
@@ -415,12 +461,14 @@ async function main() {
 		if (baseline.tap.fail !== 0) {
 			throw new Error(`基线就有 ${baseline.tap.fail} 条失败用例，先修测试再谈变异检查：\n  - ${baseline.tap.failedNames.join("\n  - ")}`);
 		}
-		if (baseline.tap.skipped !== 0) {
+		const baselineUntrusted = untrustworthyRun(baseline.tap);
+		if (baselineUntrusted !== null) {
 			throw new Error(
-				`基线有 ${baseline.tap.skipped} 条用例被 skip。skip 不会让 \`node --test\` 非 0 退出（实测退出码为 0），` +
-					"但被 skip 的用例没有运行：变异体本该变红却会全绿通过，从而被误判成 SURVIVED（假警报——报告说「无人看守」，实则是没跑）。" +
-					"脚本拒绝在这种环境下继续。" +
-					"\n  最常见的原因：宿主主题包没装上（test/appearance.test.js 读不到就只能 skip）。",
+				`基线不可信：${baselineUntrusted}。` +
+					"被跳过的用例没有运行，变异体本该变红却会全绿通过，从而被误判成 SURVIVED（假警报——报告说「无人看守」，实则是没跑）。" +
+					"skip 本身不会让 `node --test` 非 0 退出（实测退出码为 0），所以这里必须硬断言，脚本拒绝在这种环境下继续。" +
+					"\n  最常见的原因：宿主主题包没装上（test/appearance.test.js 读不到就只能 skip），" +
+					"或有人把整个测试文件包进了 `describe.skip`。",
 			);
 		}
 
@@ -455,9 +503,10 @@ async function main() {
 				await writeFile(sandboxPath, original, "utf8");
 				continue;
 			}
-			if (run.tap.skipped !== 0) {
-				results.push({ mutant, outcome: "ERROR", detail: `${run.tap.skipped} 条用例被 skip` });
-				console.log(`ERROR（${run.tap.skipped} 条用例被 skip，无法判定）`);
+			const untrusted = untrustworthyRun(run.tap);
+			if (untrusted !== null) {
+				results.push({ mutant, outcome: "ERROR", detail: untrusted });
+				console.log(`ERROR（${untrusted}，无法判定）`);
 				await writeFile(sandboxPath, original, "utf8");
 				continue;
 			}

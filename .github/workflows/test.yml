@@ -71,9 +71,19 @@ jobs:
       # 为什么不用 `node --test "test/**/*.test.js" "!test/viewport.test.js"`：
       # 已实测 Node 24 **不支持** glob 否定，那个 `!...` 参数被静默忽略，104 个用例
       # 照跑不误（含 viewport），闸门于是仍会被误杀。所以这里用 shell 算出显式列表。
+      #
+      # 列表算空时必须**显式失败**：`node --test` 在拿不到任何文件参数时会退回自己的
+      # 默认发现，递归跑遍整个 `test/`——实测 116 个用例，其中就包含
+      # test/viewport.test.js。那等于把浏览器用例偷偷搬回主 job，绕过「viewport 独立
+      # job、主 job 不受 Chrome 缺失影响」的设计，而且下面的 skipped 闸门看不出来
+      # （116 个用例全绿）。`ls` 出错（例如 test/ 被改名）同样落进这条检查。
       - name: 跑测试（并导出 TAP 报告）
         run: |
           FILES="$(ls test/*.test.js | grep -v 'test/viewport.test.js$' | tr '\n' ' ')"
+          if [ -z "$FILES" ]; then
+            echo "::error::排除 viewport 后没有剩下任何测试文件：\`node --test\` 会退回默认发现并递归跑遍 test/（含 viewport），绕过本 job 的设计。检查 test/ 下的文件名与上面的 grep 模式。"
+            exit 1
+          fi
           echo "本次执行的测试文件：$FILES"
           NODE_OPTIONS="--test-reporter=spec --test-reporter-destination=stdout --test-reporter=tap --test-reporter-destination=$RUNNER_TEMP/test-results.tap" node --test $FILES
 
@@ -236,8 +246,13 @@ jobs:
       # skip **不会**让 `node --test` 非 0 退出，退出码仍是 0；真正的危害是这些用例
       # 没有运行——变异体本该让测试变红却会全绿通过，被判成 SURVIVED，脚本于是报告
       # 「这条行为无人看守」，而事实是用例根本没跑（假警报）。脚本在基线阶段就硬断言
-      # skipped === 0 并拒绝继续，正是为了挡住这种虚假安全感。
-      # 缺主题包还会让 4 个变异体（token / opacity / 阴影）无法判定。
+      # 「没有静默跳过」并拒绝继续，正是为了挡住这种虚假安全感——判据不只看
+      # skipped === 0，还包括 tests === 0 与 TAP 里的 `# SKIP` 指令数，
+      # 因为整个文件被 describe.skip 时汇总行仍是 tests 0 / skipped 0。
+      # 缺主题包还会让 2 个变异体无法判定——实测（Node 24.19.0，摘掉守卫后观察）：
+      # panel-shadow-none 与 root-color-unknown-token 从 KILLED 变成 SURVIVED，
+      # 因为守它们的两条断言就住在 appearance 里。`muted-opacity-again` **不在其中**：
+      # 它由「次要文字不得用 opacity 调暗」的**源码文本**断言杀死，不读主题包。
       - name: 全局安装宿主主题包（钉死版本）
         run: |
           npm i -g --ignore-scripts @deepseek-ai/dsh-client-ui-theme@0.1.7-rc.2
@@ -248,9 +263,9 @@ jobs:
           fi
           echo "UL_THEME_PATH=$THEME" >> "$GITHUB_ENV"
 
-      # 不需要再套一层 skipped===0 的 shell 闸门：脚本自己已经在基线阶段
-      # 与每个变异体阶段各断言一次（skip ≠ 0 直接报错，记为 ERROR，
-      # 绝不当成 KILLED 或 SURVIVED），退出码语义已经覆盖。
+      # 不需要再套一层 shell 闸门：脚本自己已经在基线阶段与每个变异体阶段各断言
+      # 一次「没有静默跳过」（skipped ≠ 0、tests === 0、或套件级 `# SKIP` 都直接
+      # 报错，记为 ERROR，绝不当成 KILLED 或 SURVIVED），退出码语义已经覆盖。
       # 重复加闸门只会多一个会漂移的地方。
       - name: 跑变异检查
         run: npm run mutate
