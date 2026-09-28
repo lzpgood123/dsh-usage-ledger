@@ -182,6 +182,16 @@ const MUTANTS = [
 		from: '"aria-hidden": "true", onClick: onClose }',
 		to: '"aria-hidden": "false", onClick: onClose }',
 	},
+	{
+		// #5 的手工变异自证（把「缺汇率返回 undefined」改成猜一个值）固化成常驻护栏：
+		// ADR-0001 的推论是「宁可显示 —，也不猜汇率」，这条断言必须一直有人守。
+		id: "costof-missing-rate-guessed",
+		file: "src/index.js",
+		what: "汇率缺失或不是有限数时返回 0，而不是 undefined（猜一个汇率：把「—」变成看似免费的 0，金额算错且无人察觉）",
+		killer: "test/cost-of.test.js「币种不同且 rates 缺该币种 → undefined（不猜汇率）」与「rates 的值不是有限数（NaN / ±Infinity / 字符串 / null / 对象 / 函数 / 布尔）→ undefined」",
+		from: '\t\tif (typeof rate !== "number" || !Number.isFinite(rate)) return undefined;\n',
+		to: '\t\tif (typeof rate !== "number" || !Number.isFinite(rate)) return 0;\n',
+	},
 ];
 
 /**
@@ -328,7 +338,8 @@ function parseTap(output) {
 	// TAP 自己追加的、真正的 `# SKIP` 指令（前面是空格而非反斜杠）。
 	//
 	// 实测（Node 24.19.0）：整个文件包进 `describe.skip` → `# tests 0 / # skipped 0`；
-	// 7 个文件里只跳过 1 个 → `# tests 93 / # skipped 0`，两种都逃过只看 `skipped` 的守卫。
+	// 一批测试文件里只跳过 1 个 → 用例数不为 0、`# skipped 0`，两种都逃过只看
+	// `skipped` 的守卫。（这里不写死文件数与用例数：它们随每次加测试而漂移。）
 	const skips = [...output.matchAll(/^[ \t]*(?:not )?ok \d+ - .*(?<!\\)# SKIP\b/gm)].length;
 	return {
 		tests: summary("tests"),
@@ -368,8 +379,9 @@ function runTests(repoDir, files) {
  * 1. **套件级跳过**（`describe.skip` 整个套件，或整个文件）：TAP 会留下
  *    `# SKIP` 指令，但汇总行 `# skipped` 是 0——它只数被 `t.skip()` 的**用例**，
  *    跳过的**套件**不进这个数。只看 `skipped` 的守卫完全看不见它。
- *    用例数也未必为 0：实测 7 个文件里只跳过 1 个时 TAP 报 `# tests 93 / # skipped 0`，
- *    连 `tests === 0` 都看不见，只有数 `# SKIP` 指令这一条能拦住。
+ *    用例数也未必为 0：实测在「一批测试文件里只跳过 1 个」时，TAP 报的用例数仍
+ *    不为 0、`# skipped` 仍是 0，连 `tests === 0` 都看不见，只有数 `# SKIP` 指令
+ *    这一条能拦住。（不写死具体文件数/用例数：它们随每次加测试而漂移。）
  * 2. **一条用例都没跑**（空 `describe`，即文件根本没声明用例）：TAP 报
  *    `# tests 0 / # skipped 0 / 且没有任何 # SKIP 痕迹`，退出码 0。
  *    这种情况连 `# SKIP` 都没有，只有 `tests === 0` 这一条能看见——所以这个分支
