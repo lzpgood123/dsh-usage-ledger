@@ -236,10 +236,26 @@ body[data-ds-dark-theme] .ul-heat i[data-l="4"],body[data-ds-dark-theme] .ul-leg
 		 *    后台再刷新一次。缓存按查询串存，切回看过的范围同样瞬时。
 		 * 2. **数字不更新**——原来只在挂载时取一次，之后永不刷新。现在每 30 秒静默刷新
 		 *    当前范围，并在窗口重新获得焦点时立即刷新。
-		 * 3. 刷新期间保留旧数据（`stale` 标志），避免画面闪回骨架屏。
+		 * 3. 刷新期间保留旧数据，避免画面闪回骨架屏。
+		 *
+		 * ## 三态收敛：加载中 / 有数据 / 失败
+		 *
+		 * 状态里记着**它属于哪个 query**（`state.query`），这是本函数的核心不变量：
+		 *
+		 * - 范围一变，上一个 query 的载荷**立即作废**。载荷里带着它自己的
+		 *   `range.label`，把它留给新范围就会让标签与数字「自洽地错」——用户点的是
+		 *   「近 7 天」，看到的却是「本月」的标签配本月的数字。
+		 * - 只有**同一 query** 的刷新才保留旧数据。旧数据的正当用途仅此一处：静默刷新
+		 *   时画面不闪回骨架屏。
+		 * - 失败分两种：**刷新失败**（`refreshError`，已有数据仍在画面上，只加一条提示）
+		 *   与**致命错误**（`error`，没有任何数据可用，整块换成错误页）。混为一谈会让
+		 *   一次后台刷新失败把好数据换成错误页。
+		 *
+		 * `refreshing` 只在**确实有请求在飞**时为真。刷新失败后它必须回到 false，
+		 * 否则标题旁会永远挂着「更新中…」——那是一句假话，而且永不消失。
 		 *
 		 * @param range - `{kind, from, to}`。
-		 * @returns `{data, error, loading, stale, reload}`。
+		 * @returns `{data, error, loading, refreshing, refreshError, reload}`。
 		 */
 		const usageCache = new Map();
 
@@ -252,12 +268,16 @@ body[data-ds-dark-theme] .ul-heat i[data-l="4"],body[data-ds-dark-theme] .ul-leg
 				}
 				return params.toString();
 			})();
-			const cached = usageCache.get(query);
-			const [state, setState] = useState({
-				data: cached ?? null,
-				error: null,
-				loading: cached === undefined,
-				stale: cached !== undefined,
+			const [state, setState] = useState(() => {
+				const hit = usageCache.get(query);
+				return {
+					query,
+					data: hit ?? null,
+					error: null,
+					loading: hit === undefined,
+					refreshing: hit !== undefined,
+					refreshError: null,
+				};
 			});
 			const [nonce, setNonce] = useState(0);
 
@@ -265,27 +285,56 @@ body[data-ds-dark-theme] .ul-heat i[data-l="4"],body[data-ds-dark-theme] .ul-leg
 				const controller = new AbortController();
 				const hit = usageCache.get(query);
 				// 有缓存就先把画面放出来，同时后台刷新；没缓存才显示加载态。
-				setState((prev) => ({
-					data: hit ?? prev.data,
-					error: null,
-					loading: hit === undefined,
-					stale: hit !== undefined,
-				}));
+				setState((prev) => {
+					// 同一 query 的刷新保留旧数据；范围一变，旧载荷立即作废。
+					const kept = prev.query === query ? prev.data : null;
+					const data = hit ?? kept;
+					return { query, data, error: null, loading: data === null, refreshing: data !== null, refreshError: null };
+				});
 				fetchUsage(query, controller.signal)
-					.then((data) => {
-						usageCache.set(query, data);
-						setState({ data, error: null, loading: false, stale: false });
+					.then((payload) => {
+						usageCache.set(query, payload);
+						// 迟到的成功属于已经切走的范围：缓存照填，但不许它把画面改回去。
+						setState((prev) =>
+							prev.query === query ? { query, data: payload, error: null, loading: false, refreshing: false, refreshError: null } : prev,
+						);
 					})
 					.catch((error) => {
 						if (error?.name === "AbortError") return;
-						// 刷新失败时，有旧数据就继续用，别把已有画面换成错误。
-						setState((prev) => (prev.data !== null ? { ...prev, loading: false, stale: true } : { data: null, error: error?.message ?? String(error), loading: false, stale: false }));
+						const message = error?.message ?? String(error);
+						setState((prev) => {
+							if (prev.query !== query) return prev;
+							if (prev.data !== null) {
+								// 刷新失败：旧数据继续显示，但必须说出来——否则用户以为它是最新的。
+								return { ...prev, loading: false, refreshing: false, refreshError: message };
+							}
+							// 没有任何数据可用：这是致命错误，必须可见。
+							return { ...prev, loading: false, refreshing: false, error: message };
+						});
 					});
 				return () => controller.abort();
 			}, [query, nonce]);
 
+			// 这一帧能用的数据，只属于**当前** query。
+			//
+			// effect 在真实 React 里是渲染**之后**才跑的，所以「范围刚变」的那一帧里
+			// `state.query` 还是旧值。若直接把它交出去，用户看到的就是上一个范围的
+			// 标签与数字——正是「自洽地错」的来源。所以这里按 query 归属过滤一遍：
+			// 不属于当前 query 的载荷一律作废，只有缓存里确实有的才拿来用。
+			const owned = state.query === query;
+			const hit = usageCache.get(query);
+			const data = owned ? state.data : (hit ?? null);
+			const error = owned ? state.error : null;
+			const loading = owned ? state.loading : data === null;
+			const refreshing = owned ? state.refreshing : data !== null;
+			const refreshError = owned ? state.refreshError : null;
+
 			return {
-				...state,
+				data,
+				error,
+				loading,
+				refreshing,
+				refreshError,
 				reload: useCallback(() => {
 					usageCache.delete(query);
 					setNonce((value) => value + 1);
@@ -694,7 +743,7 @@ body[data-ds-dark-theme] .ul-heat i[data-l="4"],body[data-ds-dark-theme] .ul-leg
 				models: { key: "tokens", direction: "desc" },
 				providers: { key: "tokens", direction: "desc" },
 			});
-			const { data, error, loading, stale, reload } = useUsage({ kind, from, to });
+			const { data, error, loading, refreshing, refreshError, reload } = useUsage({ kind, from, to });
 			// 打开面板时焦点必须进得来，否则键盘用户根本到不了里面。
 			const panelRef = useRef(null);
 
@@ -791,7 +840,8 @@ body[data-ds-dark-theme] .ul-heat i[data-l="4"],body[data-ds-dark-theme] .ul-leg
 						h("div", { className: "ul-title" }, "用量账本"),
 						data !== null ? h("div", { className: "ul-muted", style: { fontSize: "11px" } }, data.range?.label ?? "") : null,
 						// 刷新状态可见，但不遮挡内容：刷新时画面仍是旧数据，只是标题旁转一下。
-						stale || loading ? h("div", { className: "ul-muted", style: { fontSize: "11px" } }, "更新中…") : null,
+						// 只在**确实有请求在飞**时出现——刷新失败后它必须消失，否则这句话是假的。
+						refreshing ? h("div", { className: "ul-muted", style: { fontSize: "11px" } }, "更新中…") : null,
 						h("button", { className: "ul-iconbtn", onClick: reload, title: "刷新" }, "↻"),
 						h("button", { className: "ul-iconbtn", onClick: onClose, title: "关闭" }, "×"),
 					),
@@ -817,6 +867,12 @@ body[data-ds-dark-theme] .ul-heat i[data-l="4"],body[data-ds-dark-theme] .ul-leg
 							: h(
 									"div",
 									null,
+									// 刷新失败与致命错误是两回事：这里**有**数据，所以只加一条提示，
+									// 绝不把已经画出来的好数据换成错误页。不说出来的话，用户会把
+									// 旧数字当成刚拉到的，那比看到一条错误更糟。
+									refreshError !== null
+										? h("div", { className: "ul-warn" }, `刷新失败：${refreshError}　—— 以下仍是上一次成功读取的数据。`)
+										: null,
 									h(SummaryCards, { totals: data.totals, cost: data.cost, currency: data.cost?.currency }),
 									h(
 										"div",
@@ -891,6 +947,9 @@ body[data-ds-dark-theme] .ul-heat i[data-l="4"],body[data-ds-dark-theme] .ul-leg
 			useStyles();
 			const [open, setOpen] = useState(false);
 			const [today, setToday] = useState(() => usageCache.get("range=today") ?? null);
+			// 加载中与失败必须可区分：两者都还没有数字，但「正在拉」与「拉不到」对用户
+			// 是两件事。原来两个 `.catch(() => undefined)` 让失败永远停在「…」上。
+			const [todayError, setTodayError] = useState(null);
 			const mounted = useRef(true);
 			// 关闭后焦点要归还给徽章，否则键盘用户会被扔回页面顶部。
 			const badgeRef = useRef(null);
@@ -903,6 +962,10 @@ body[data-ds-dark-theme] .ul-heat i[data-l="4"],body[data-ds-dark-theme] .ul-leg
 			 * 提前把它填好，点开就只剩渲染（实测 26ms）。
 			 *
 			 * 两个请求并发发出，谁先回来都不影响另一个。
+			 *
+			 * 预热请求失败**不**影响徽章：它只是替面板省一次等待，失败了面板自己会重取。
+			 * 今日请求失败才要说话——而且只在**没有**可用数字时才把「…」换成失败态；
+			 * 已经有数字时保留数字，失败通过 title 表达，免得把已知的信息抹掉。
 			 */
 			const load = useCallback(() => {
 				const remembered = loadRange();
@@ -915,9 +978,14 @@ body[data-ds-dark-theme] .ul-heat i[data-l="4"],body[data-ds-dark-theme] .ul-leg
 				fetchUsage("range=today")
 					.then((data) => {
 						usageCache.set("range=today", data);
-						if (mounted.current) setToday(data);
+						if (!mounted.current) return;
+						setToday(data);
+						setTodayError(null);
 					})
-					.catch(() => undefined);
+					.catch((error) => {
+						if (error?.name === "AbortError") return;
+						if (mounted.current) setTodayError(error?.message ?? String(error));
+					});
 			}, []);
 
 			useEffect(() => {
@@ -934,15 +1002,25 @@ body[data-ds-dark-theme] .ul-heat i[data-l="4"],body[data-ds-dark-theme] .ul-leg
 				};
 			}, [load]);
 
+			// 有数字就显示数字；没有数字时，「…」表示还在拉，「读取失败」表示拉不到——
+			// 三者互不混同。数字缺位是唯一能把失败画成文字的地方，所以只在缺位时替换；
+			// 但**无论有没有数字**，失败都要在 title 上说出来：否则用户会把上一次的
+			// 数字当成刚拉到的。
+			const badgeTitle = todayError !== null ? "用量账本（今日数据读取失败）" : "用量账本（本地会话日志统计）";
+
 			return h(
 				"div",
 				{ className: "ul-root" },
 				h(
 					"button",
-					{ className: "ul-badge", ref: badgeRef, onClick: () => setOpen((value) => !value), title: "用量账本（本地会话日志统计）" },
+					{ className: "ul-badge", ref: badgeRef, onClick: () => setOpen((value) => !value), title: badgeTitle },
 					h("span", { className: "dot" }),
 					h("span", { className: "t" }, "用量账本"),
-					h("span", { className: "n" }, today === null ? "…" : fmtTokens(today.totals?.tokens ?? 0)),
+					h(
+						"span",
+						{ className: "n" },
+						today !== null ? fmtTokens(today.totals?.tokens ?? 0) : todayError !== null ? "读取失败" : "…",
+					),
 				),
 				// 关闭路径统一走这里：归还焦点。徽章按钮上再点一次会关闭面板，而那时
 				// 焦点本来就在徽章上，再 focus 一次是幂等的，所以两条路径共用一个函数。

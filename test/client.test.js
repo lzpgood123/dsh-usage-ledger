@@ -69,11 +69,22 @@ function flush() {
  * 稳定，所以同一个下标永远对应同一个状态槽。`useEffect` 与默认桩一致：
  * 立刻执行、立刻清理（`useUsage` 的预取挂在副作用里，不执行就拿不到数据）。
  *
- * @returns `{stub, begin, slots}`；`stub` 传给 {@link loadClient} 的 `react` 选项。
+ * `deferCleanup` 为 true 时把清理函数推迟到**下一次 `begin()`**（以及
+ * {@link statefulReact.dispose}）执行，而不是立刻执行。徽章这类组件用
+ * `mounted` ref 挡住「卸载后 setState」，而默认桩的「立刻清理」会在请求回来之前
+ * 就把 `mounted` 置 false，于是那条路径永远测不到。
+ *
+ * @param options - `{deferCleanup}`，默认 `false`（与既有用例的行为一致）。
+ * @returns `{stub, begin, dispose, slots}`；`stub` 传给 {@link loadClient} 的 `react` 选项。
  */
-function statefulReact() {
+function statefulReact({ deferCleanup = false } = {}) {
 	const slots = [];
 	let cursor = 0;
+	const pendingCleanups = [];
+	/** 依次执行尚未执行的清理函数。 */
+	const runCleanups = () => {
+		while (pendingCleanups.length > 0) pendingCleanups.shift()();
+	};
 	return {
 		stub: {
 			createElement: (type, props, ...children) => ({
@@ -101,15 +112,22 @@ function statefulReact() {
 			},
 			useEffect(effect) {
 				const cleanup = effect();
-				if (typeof cleanup === "function") cleanup();
+				if (typeof cleanup !== "function") return;
+				if (deferCleanup) pendingCleanups.push(cleanup);
+				else cleanup();
 			},
 			useCallback(callback) {
 				return callback;
 			},
 		},
-		/** 下一次渲染前调用：把 hook 游标归零。 */
+		/** 下一次渲染前调用：把 hook 游标归零，并结算上一次渲染欠下的清理。 */
 		begin() {
 			cursor = 0;
+			runCleanups();
+		},
+		/** 用例收尾：结算仍未执行的清理（例如卸载徽章）。 */
+		dispose() {
+			runCleanups();
 		},
 		slots,
 	};
@@ -806,6 +824,274 @@ test("遮罩对辅助技术隐藏、点击可关闭，且不是唯一出口（×
 	// 反向核对：非 Escape 的按键不能误关面板。
 	panel.props.onKeyDown({ key: "a", stopPropagation() {} });
 	assert.equal(closed.length, 3, "普通按键不该关闭面板");
+});
+
+//#endregion
+
+//#region 三态：加载中 / 有数据 / 失败（A8 回归）
+
+/**
+ * 手动控制的 fetch 桩：每个查询串各挂一条**可以稍后结算**的 promise。
+ *
+ * 用有状态 React 桩渲染组件时，`useEffect` 立刻执行、立刻清理，而 promise 要等到
+ * 下一次 `await` 才结算。所以「已缓存范围 A」必须先让它的请求结算完（此时组件已
+ * 卸载，state 不再更新，但模块级 `usageCache` 已经填好），再渲染切到范围 B 的
+ * 那一帧——这正是真实浏览器里「打开面板时缓存已预热」的时序。
+ *
+ * @returns `{fetch, requests, resolve}`；`requests` 按调用顺序记录查询串，
+ *   `resolve(query, payload)` 结算该查询的**最新**一个未决请求。
+ */
+function deferredFetch() {
+	const requests = [];
+	const waiting = new Map();
+
+	/** 结算某个查询串最新的未决请求。 */
+	const resolve = (query, payload) => {
+		const queue = waiting.get(query);
+		assert.ok(queue !== undefined && queue.length > 0, `没有等待中的请求：${query}`);
+		queue.shift()({ ok: true, status: 200, json: async () => payload });
+	};
+
+	/** 让某个查询串最新的未决请求失败（HTTP 500，不是 AbortError）。 */
+	const reject = (query, message = "HTTP 500") => {
+		const queue = waiting.get(query);
+		assert.ok(queue !== undefined && queue.length > 0, `没有等待中的请求：${query}`);
+		queue.shift()(Promise.reject(new Error(message)));
+	};
+
+	return {
+		fetch: (url) => {
+			const query = String(url).split("?")[1] ?? "";
+			requests.push(query);
+			return new Promise((settle) => {
+				if (!waiting.has(query)) waiting.set(query, []);
+				waiting.get(query).push(settle);
+			});
+		},
+		requests,
+		resolve,
+		reject,
+	};
+}
+
+/**
+ * 面板范围标签：`.ul-head` 里那行 `font-size:11px` 的次要文字，**排除**刷新提示。
+ *
+ * 标签与「更新中…」共用同一个样式对象，所以只能按文案区分；找不到标签时返回空串
+ * ——「没有标签」本身就是要断言的语义（新范围还没有数据，标签必须为空）。
+ *
+ * @param node - 面板元素树。
+ * @returns 范围标签文本，或空串。
+ */
+function rangeLabel(node) {
+	const head = findAllByClass(node, "ul-head")[0];
+	assert.ok(head !== undefined, "面板里找不到 .ul-head");
+	const labels = findAll(
+		head,
+		(element) => element.props?.className === "ul-muted" && element.props?.style?.fontSize === "11px" && textOf(element) !== "更新中…",
+	);
+	assert.ok(labels.length <= 1, `范围标签至多一条，实际 ${labels.length} 条`);
+	return labels.length === 0 ? "" : textOf(labels[0]);
+}
+
+/** 点面板上的范围标签页（`今日` / `近 7 天` / `本月` / `累计`）。 */
+function clickTab(node, label) {
+	const found = findAll(node, (element) => element.type === "button" && element.props?.className === "ul-tab" && textOf(element) === label);
+	assert.equal(found.length, 1, `找不到范围标签页「${label}」`);
+	return found[0];
+}
+
+/** 面板里的「更新中…」提示条（有则返回它的文本，没有返回 null）。 */
+function refreshingNote(node) {
+	const head = findAllByClass(node, "ul-head")[0];
+	assert.ok(head !== undefined, "面板里找不到 .ul-head");
+	const found = findAll(head, (element) => textOf(element) === "更新中…");
+	return found.length === 0 ? null : textOf(found[0]);
+}
+
+test("A8：切到无缓存的范围时，范围标签与卡片数字都不得复用上一个范围的陈旧载荷", async (t) => {
+	const net = deferredFetch();
+	const harness = statefulReact();
+	const { exports } = await load(t, { fetch: net.fetch, react: harness.stub });
+	const render = () => {
+		harness.begin();
+		return exports.Panel({ onClose: () => {} });
+	};
+
+	// 第一帧：默认范围是 month，请求挂起 → 加载态。
+	const first = render();
+	assert.match(textOf(first), /正在读取本地会话日志/, "首次渲染应当是加载态");
+	assert.deepEqual(net.requests, ["range=month"], "首帧应当只请求 month");
+
+	// month 的载荷回来（组件已卸载，但模块级缓存被填好，这正是徽章预热的时序）。
+	net.resolve("range=month", { ...payloadWith({ priced: false }), range: { label: "本月" } });
+	await flush();
+
+	// 第二帧：同一范围、缓存命中 → 立即出画面，标签与数字都属于 month。
+	const cached = render();
+	assert.equal(rangeLabel(cached), "本月", "缓存命中时应当直接显示 month 的范围标签");
+	assert.equal(cardValue(cached, "消耗总量"), "1234.6 万", "缓存命中时应当显示 month 的数字");
+
+	// 第三帧：点「近 7 天」（无缓存、fetch 永久挂起）。
+	clickTab(cached, "近 7 天").props.onClick();
+	const node = render();
+
+	assert.equal(net.requests.at(-1), "range=week", "切范围必须发出 week 的请求");
+	assert.notEqual(
+		rangeLabel(node),
+		"本月",
+		"范围标签读的是上一个范围的旧载荷：标签与数字会「自洽地错」，用户看到的是「近 7 天」选中但数字是本月",
+	);
+	assert.equal(rangeLabel(node), "", "week 还没有数据：范围标签必须为空，不能借用 month 的标签");
+	assert.match(textOf(node), /正在读取本地会话日志/, "无缓存的范围必须显示加载态");
+	assert.equal(
+		findAllByClass(node, "ul-card").length,
+		0,
+		"无缓存的范围不得渲染上一个范围的汇总卡片：那张卡片的数字属于另一个查询",
+	);
+});
+
+test("A8：同一范围的静默刷新必须保留旧数据，不能被加载态顶掉", async (t) => {
+	const net = deferredFetch();
+	const harness = statefulReact();
+	const { exports } = await load(t, { fetch: net.fetch, react: harness.stub });
+	const render = () => {
+		harness.begin();
+		return exports.Panel({ onClose: () => {} });
+	};
+
+	render();
+	net.resolve("range=month", { ...payloadWith({ priced: false }), range: { label: "本月" } });
+	await flush();
+
+	// 点「刷新」：同一 query 的静默刷新。
+	const reloading = render();
+	findAll(reloading, (element) => element.type === "button" && element.props.title === "刷新")[0].props.onClick();
+	const during = render();
+
+	assert.equal(rangeLabel(during), "本月", "同范围刷新期间范围标签必须保留");
+	assert.equal(cardValue(during, "消耗总量"), "1234.6 万", "同范围刷新期间旧数据必须继续显示，不能闪回骨架屏");
+	assert.equal(refreshingNote(during), "更新中…", "同范围刷新期间应当明确显示「更新中…」");
+
+	// 刷新成功：新数字替换旧数字。
+	net.resolve("range=month", { ...payloadWith({ priced: false }), range: { label: "本月" }, totals: { ...payloadWith({}).totals, tokens: 999 } });
+	await flush();
+	const after = render();
+	assert.equal(cardValue(after, "消耗总量"), "999", "刷新成功后必须换成新数据");
+	assert.equal(refreshingNote(after), null, "刷新成功后「更新中…」必须消失");
+});
+
+test("A8：刷新持续失败不得永久显示「更新中…」，但已有数据必须留在画面上", async (t) => {
+	const net = deferredFetch();
+	const harness = statefulReact();
+	const { exports } = await load(t, { fetch: net.fetch, react: harness.stub });
+	const render = () => {
+		harness.begin();
+		return exports.Panel({ onClose: () => {} });
+	};
+
+	render();
+	net.resolve("range=month", { ...payloadWith({ priced: false }), range: { label: "本月" } });
+	await flush();
+	const loaded = render();
+	assert.equal(cardValue(loaded, "消耗总量"), "1234.6 万", "前置条件：第一次必须成功拿到数据");
+
+	// 点刷新，然后让请求失败（HTTP 500，不是 AbortError）。
+	findAll(loaded, (element) => element.type === "button" && element.props.title === "刷新")[0].props.onClick();
+	render();
+	net.reject("range=month");
+	await flush();
+
+	const failed = render();
+	assert.equal(
+		refreshingNote(failed),
+		null,
+		"刷新已经失败、也没有请求在飞，却还在说「更新中…」：文案是假的，且会永久挂在那里",
+	);
+	assert.equal(cardValue(failed, "消耗总量"), "1234.6 万", "刷新失败不得把已有数据换成错误页");
+	assert.equal(rangeLabel(failed), "本月", "刷新失败后范围标签必须还在");
+	assert.equal(findAllByClass(failed, "ul-err").length, 0, "有数据的刷新失败不是致命错误：不能整块换成错误页");
+	const warn = findAllByClass(failed, "ul-warn");
+	assert.equal(warn.length, 1, "刷新失败必须有一条可见文案，否则用户以为数字是最新的");
+	assert.match(textOf(warn[0]), /刷新失败/, `刷新失败文案里必须说清是「刷新」失败：${textOf(warn[0])}`);
+	assert.match(textOf(warn[0]), /仍在显示|上一次/, "刷新失败文案必须告诉用户画面上的数字是旧的");
+});
+
+test("A8：无数据时的失败是致命错误，必须显示错误页而不是永远「加载中」", async (t) => {
+	const net = deferredFetch();
+	const harness = statefulReact();
+	const { exports } = await load(t, { fetch: net.fetch, react: harness.stub });
+
+	harness.begin();
+	const node = exports.Panel({ onClose: () => {} });
+	assert.match(textOf(node), /正在读取本地会话日志/, "前置条件：首帧是加载态");
+	net.reject("range=month");
+	await flush();
+
+	harness.begin();
+	const failed = exports.Panel({ onClose: () => {} });
+	assert.equal(findAllByClass(failed, "ul-err").length, 1, "没有任何数据可用时，失败必须变成可见的错误页");
+	assert.match(textOf(failed), /读取失败/, "错误页必须说清是读取失败");
+	assert.equal(findAllByClass(failed, "ul-card").length, 0, "没有数据时不该渲染出数字");
+});
+
+test("A8：徽章拉取持续失败时不得永久停在「…」，必须给出可区分的失败态", async (t) => {
+	const net = deferredFetch();
+	const harness = statefulReact({ deferCleanup: true });
+	// 推迟清理意味着徽章的 setInterval 还在跑：用例失败也必须收尾，否则进程不退出。
+	t.after(() => harness.dispose());
+	const { exports } = await load(t, { fetch: net.fetch, react: harness.stub });
+
+	// 徽章挂载即预热 today 与上次范围；让两个请求都失败。
+	harness.begin();
+	exports.Badge({});
+	net.reject("range=month");
+	net.reject("range=today");
+	// 清理被推迟到下一次 begin()，所以失败回调执行时 mounted 仍为 true——那条分支真的跑到了。
+	await flush();
+
+	harness.begin();
+	const node = exports.Badge({});
+	const text = textOf(node);
+
+	assert.doesNotMatch(text, /…/, "徽章 fetch 失败后永远停在「…」：加载中与失败不可区分，用户会以为它一直在加载");
+	assert.match(text, /用量账本/, "失败态不能把徽章标题弄丢");
+	const badge = findAllByClass(node, "ul-badge")[0];
+	assert.equal(badge.props.title, "用量账本（今日数据读取失败）", `失败态必须有可区分的 title，实际是「${badge.props.title}」`);
+	harness.dispose();
+});
+
+test("A8：徽章已有数字后刷新失败，旧数字必须保留（不能退回「…」）", async (t) => {
+	const net = deferredFetch();
+	const harness = statefulReact({ deferCleanup: true });
+	// 推迟清理意味着徽章的 setInterval 还在跑：用例失败也必须收尾，否则进程不退出。
+	t.after(() => harness.dispose());
+	const { exports } = await load(t, { fetch: net.fetch, react: harness.stub });
+
+	// 第一轮：成功拿到今日数字。
+	harness.begin();
+	exports.Badge({});
+	net.resolve("range=month", { ...payloadWith({ priced: false }), range: { label: "本月" } });
+	net.resolve("range=today", { ...payloadWith({ priced: false }), range: { label: "今日" } });
+	await flush();
+
+	harness.begin();
+	const ok = exports.Badge({});
+	assert.match(textOf(ok), /1234\.6 万/, "前置条件：徽章必须显示今日数字");
+
+	// 第二轮：再次挂载并让这一轮请求失败——旧数字必须留着，失败要看得见。
+	harness.begin();
+	exports.Badge({});
+	net.reject("range=month");
+	net.reject("range=today");
+	await flush();
+
+	harness.begin();
+	const after = exports.Badge({});
+	assert.match(textOf(after), /1234\.6 万/, "徽章刷新失败时必须保留旧数字，不能退回「…」");
+	const badge = findAllByClass(after, "ul-badge")[0];
+	assert.equal(badge.props.title, "用量账本（今日数据读取失败）", "刷新失败必须可见：否则用户以为这个数字是刚才拉到的");
+	harness.dispose();
 });
 
 //#endregion
