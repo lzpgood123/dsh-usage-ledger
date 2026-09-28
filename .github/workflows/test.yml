@@ -209,3 +209,45 @@ jobs:
           fi
 
           echo "视口：$TESTS 个用例全部真实执行，0 失败，0 跳过。"
+
+  # 变异检查 job：证明「测试真的在守行为」，而不是碰巧全绿。
+  #
+  # 为什么独立成 job：
+  # - 它慢（本机 3s，CI 上随机器放大），不该拖慢主测试 job；
+  # - 它要写临时目录、复制仓库再改坏源码，与主 job 的干净环境不同；
+  # - 它验证的是**测试的质量**，不是代码的功能——两者失败时的排查方向不同。
+  #
+  # 它**不是** `npm test` 的替代品：`npm test` 说「代码现在是对的」，
+  # 这个 job 说「测试真的抓得住错」。两者都要有。
+  mutation:
+    name: 变异检查
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      # 必须装宿主主题包，否则这个 job 一定失败——而且是有意失败：
+      # test/appearance.test.js 读不到主题包时那 16 条会 skip，而 skip 会让
+      # `node --test` 非 0 退出，于是每个变异体都会被误判成 KILLED。脚本在
+      # 基线阶段就硬断言 skipped === 0 并拒绝继续，正是为了挡住这种虚假安全感。
+      # 缺主题包还会让 4 个变异体（token / opacity / 阴影）无法判定。
+      - name: 全局安装宿主主题包（钉死版本）
+        run: |
+          npm i -g --ignore-scripts @deepseek-ai/dsh-client-ui-theme@0.1.7-rc.2
+          THEME="$(npm root -g)/@deepseek-ai/dsh-client-ui-theme/lib/client.js"
+          if [ ! -f "$THEME" ]; then
+            echo "::error::主题包装完后在 $THEME 找不到 client.js：appearance 用例会全部 skip，变异检查将在基线阶段失败。"
+            exit 1
+          fi
+          echo "UL_THEME_PATH=$THEME" >> "$GITHUB_ENV"
+
+      # 不需要再套一层 skipped===0 的 shell 闸门：脚本自己已经在基线阶段
+      # 与每个变异体阶段各断言一次（skip ≠ 0 直接报错，绝不算 KILLED），
+      # 退出码语义已经覆盖。重复加闸门只会多一个会漂移的地方。
+      - name: 跑变异检查
+        run: npm run mutate
