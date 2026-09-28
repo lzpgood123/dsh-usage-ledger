@@ -95,9 +95,23 @@ window.__ModuleLoader__.load({
 		const CSS = `
 .ul-root{--ul-radius:10px;font-size:12px;line-height:1.6;color:var(--dsw-alias-label-primary,currentColor)}
 .ul-backdrop{position:fixed;inset:0;z-index:999}
+/* box-sizing:border-box 是这里的承重墙，不是排版偏好：面板同时有 width 与 padding，
+   默认的 content-box 会把 padding（32px）与 border（2px）**加到** width 之外，
+   于是 min(760px, calc(100vw - 24px)) 实际占掉「100vw - 24px + 34px」。面板又是
+   fixed 定位，多出来的 34px 既不会撑出 body 滚动条、也不进 document.scrollWidth
+   ——它只是被视口切掉，页面看起来"没坏"，而右侧内容用户根本看不到。
+   （注意：本样式表在模板字符串里，注释中不可出现反引号。） */
 .ul-panel{position:fixed;z-index:1000;left:12px;bottom:64px;width:min(760px,calc(100vw - 24px));max-height:min(78vh,820px);overflow:auto;
+  box-sizing:border-box;
   background:var(--dsw-alias-bg-layer-1);border:1px solid var(--dsw-alias-border-l3,currentColor);border-radius:var(--ul-radius);
   box-shadow:var(--dsw-elevation-panel);padding:14px 16px 16px}
+/* 窄视口：面板占满宽度。left/right 必须一起归零——只改 width 不改 left，
+   残留的 left:12px 仍会与宽度叠加把右边缘推出视口（实测 480px 下右边缘在 502px）。
+   同时把 bottom 从 64px 收到 8px：64px 是对徽章高度的硬编码耦合，窄屏上
+   徽章往往不在原位，那 64px 只会白白吃掉可视高度。 */
+@media (max-width:760px){
+  .ul-panel{left:0;right:0;width:auto;bottom:8px}
+}
 .ul-head{display:flex;align-items:center;gap:8px;margin-bottom:10px}
 .ul-title{font-size:13px;font-weight:600;flex:1}
 .ul-iconbtn{background:transparent;border:1px solid var(--dsw-alias-border-l2,currentColor);color:inherit;border-radius:6px;
