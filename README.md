@@ -134,18 +134,22 @@ GET /api/usage-ledger?range=today|week|month|all|custom&from=YYYY-MM-DD&to=YYYY-
 ## 结构
 
 ```
-src/index.js               宿主端：挂 HTTP 路由与 /usage 命令，按范围聚合、计价
-src/scan.js                会话日志扫描与聚合（多帧 zstd 解压、usage 提取）
-src/client.js              浏览器端面板（手写 ModuleLoader bundle，无构建步骤）
-test/scan.test.js          扫描策略：缓存、淘汰、容错
-test/list-sessions.test.js 会话文件枚举与跨代去重
-test/payload.test.js       载荷组装：范围折算、371 天窗口、渠道计价
-test/client.test.js        浏览器端导出的纯函数与组件
-test/appearance.test.js    外观契约：宿主 token 存在性、色阶可辨、键盘可达
-test/contract.test.js      跨端契约：两端字面量必须一致（见下）
-test/fixtures.js           事件构造器（运行时压缩，不入库二进制）
-test/memory-source.js      内存版 Source adapter
-test/client-harness.js     浏览器端 bundle 的 stub-loader 夹具
+src/index.js                宿主端：挂 HTTP 路由与 /usage 命令，按范围聚合、计价
+src/scan.js                 会话日志扫描与聚合（多帧 zstd 解压、usage 提取）
+src/client.js               浏览器端面板（手写 ModuleLoader bundle，无构建步骤）
+scripts/mutation-check.mjs  变异检查：把源码改坏，验证测试真的会红（见下）
+test/scan.test.js           扫描策略：缓存、淘汰、容错
+test/list-sessions.test.js  会话文件枚举与跨代去重
+test/payload.test.js        载荷组装：范围折算、371 天窗口、渠道计价
+test/cost-of.test.js        计价口径：缺价格或缺汇率一律留空，不拿 0 冒充免费
+test/screen-request.test.js 回环闸门：只放行精确回环地址，局域网一律 403
+test/client.test.js         浏览器端导出的纯函数与组件
+test/appearance.test.js     外观契约：宿主 token 存在性、色阶可辨、键盘可达
+test/contract.test.js       跨端契约：两端字面量必须一致（见下）
+test/viewport.test.js       视口几何：真实 Chrome 驱动，面板不得被切出视口
+test/fixtures.js            事件构造器（运行时压缩，不入库二进制）
+test/memory-source.js       内存版 Source adapter
+test/client-harness.js      浏览器端 bundle 的 stub-loader 夹具
 ```
 
 `src/scan.js` 里，扫描策略与文件 I/O 之间有一个内部 seam：`createScanner(source)`
@@ -162,14 +166,26 @@ test/client-harness.js     浏览器端 bundle 的 stub-loader 夹具
 零依赖，用 Node 内置运行器（`node >= 22`）：
 
 ```sh
-npm test        # node --test "test/**/*.test.js"，86 个用例
+npm test        # node --test "test/**/*.test.js"
 ```
 
-注意 glob 不能省：裸 `node --test` 会把 `test/` 下的**所有** `.js` 都当测试文件
-跑（含 `fixtures.js`、`client-harness.js` 这两个纯夹具），用例数因此虚高。`npm test`
-只跑 `*.test.js`。
+**这里刻意不写用例数**：这类硬编码每次加测试都会过期，`scripts/` 与 workflow 里的
+同类计数已经清过一轮。要数字就跑一次，TAP 的汇总行才是权威：
 
-覆盖：
+```sh
+node --test --test-reporter=tap "test/**/*.test.js" | grep -E '^# (tests|skipped)'
+```
+
+glob 不能省：裸 `node --test` 会退回**默认发现**，递归跑遍 `test/`，把 `fixtures.js`、
+`memory-source.js`、`client-harness.js` 这些纯夹具也各当成一个测试文件跑一遍，
+用例数因此虚高。`npm test` 只跑 `*.test.js`。
+
+还要注意 **`npm test` 不是「全绿」的同义词**：它包含 `test/viewport.test.js`，
+而没有 Chrome 的机器上那几条只能 `t.skip()`——skip **不会**让 `node --test` 以非 0
+退出。也就是说无浏览器环境下 `npm test` 照样退出 0，只是少验证了几条几何断言。
+CI 因此把浏览器用例拆进独立的 job（见下）。
+
+### 覆盖
 
 - **扫描策略**（`scan.test.js`）：缓存命中与失效、删除后的淘汰、损坏文件与断尾帧的
   容错、非空压缩文件零帧计入 failed，以及 `recordOf` 的用量口径。缓存那几条刻意
@@ -181,6 +197,22 @@ npm test        # node --test "test/**/*.test.js"，86 个用例
   下界、渠道成本按未舍入值求和后只舍入一次、时钟注入。用合成记录与合成价格表，
   因为本机语料跨度远小于 371 天、且舍入漂移恰好不到翻转阈值——这两类缺陷在真实
   语料上不可见。
+- **计价口径**（`cost-of.test.js`）：口径是「宁可显示 —，也不猜汇率」，落到 `costOf`
+  的两处 `return undefined` 上——价格缺失返回 `undefined` 而**不是 0**；条目币种与
+  目标币种不同、而 `rates` 里没有该币种的**有限数**汇率时同样返回 `undefined`
+  （不拿 1、也不拿 0 顶上）。用例把「缺失」与「显式给出的 0」明确分开，并用带 get
+  陷阱的汇率表证明币种相同时实现**根本不查 `rates`**。这两处一旦退化成 `?? 0`，
+  未定价的渠道会被静默算成 ¥0，正是要避免的「0 冒充免费」。理由见
+  `docs/adr/0001-official-list-price-accounting.md`。
+- **回环闸门**（`screen-request.test.js`）：就是「HTTP 接口」那节的回环闸门——
+  `screenRequest` 是面板唯一的安全边界。判据是三个字面量的**精确匹配**
+  （`127.0.0.1` / `::1` / `::ffff:127.0.0.1`），不是网段匹配也不是前缀匹配，所以
+  `127.0.0.2` 被拒是**有意为之**。最危险的边界是 IPv4-mapped 地址：
+  `::ffff:127.0.0.1` 放行，而 `::ffff:192.168.1.9` 必须 403——两者只差中间几段，
+  任何「前缀匹配 `::ffff:127.`」或「包含 `127.0.0.1`」的写法都会把局域网地址误判成
+  本机。全部用例都是纯函数调用（注入 `{socket:{remoteAddress}}`），零网络、不起
+  HTTP server。这个文件出现之前，`grep -rn screenRequest test/` 是零命中：把判据
+  改成无条件放行（`const ok = true`）不会有任何测试变红。
 - **浏览器端**（`client.test.js`）：`fmtTokens`、`Heatmap` 的分档与整周对齐、
   `Badge` / `Panel` 的加载态与缺失金额显示。`src/client.js` 不能 `import`，所以由
   `client-harness.js` 用 stub loader 执行源码后取出导出。
@@ -198,8 +230,58 @@ npm test        # node --test "test/**/*.test.js"，86 个用例
   以及键盘契约——`aria-sort` 真的接到排序状态、可排序表头是真实 `<button>`、
   面板是 `role="dialog"`、Esc 真的关闭、焦点进得来也回得去、`:focus-visible` 可见。
   宿主主题包不存在时，依赖它的用例会显式 `t.skip()` 并说明原因，而不是假装通过。
+- **视口几何**（`viewport.test.js`）：真实 Chrome 驱动，在 480 / 768 / 900 / 1400
+  四档视口下断言面板**不越出视口边界**——判据是 `getBoundingClientRect()` 的右边缘，
+  刻意不用 `body.scrollWidth`：修复前的基线里面板越界 22px 与「滚动宽度比视口还窄」
+  **同时成立**，基于滚动宽度的断言会放行这个 bug。另有一组用例单独守
+  `@media (max-width:760px)`：只加 `box-sizing:border-box` 就已经让四档全部落在
+  视口内，所以主断言区分不出 `@media` 在不在，窄视口的几何差异需要自己的断言。
+  Chrome 缺失时显式 `t.skip()` 并说明原因。
 
 fixture 全部在测试运行时用 `zstdCompressSync` 构造，仓库里不存二进制。
+
+### CI 与变异检查
+
+`.github/workflows/test.yml` 有三个 job，职责不同，闸门方向也不同：
+
+- **`test`**（主 job，Node 22 与 24 各跑一遍）：用 shell 算出的**显式文件列表**，
+  把 `test/viewport.test.js` 排除在外。它**故意不用 `npm test`**：浏览器用例在拿不到
+  Chrome 的环境里只能 skip，而这个 job 有一道「`skipped` 必须为 0」的硬闸门——用
+  「环境缺 Chrome」去否决一批本来能跑的用例是错的。列表算空时会**显式失败**：
+  `node --test` 拿不到文件参数就会退回默认发现、把 viewport 连同 `test/` 下的纯夹具
+  一并偷偷跑一遍，等于绕开这套设计，而闸门看不出来。
+- **`viewport`**：只跑 `test/viewport.test.js`，方向正好相反——**skip 就是失败**。
+  这个 job 存在的唯一意义是量真实几何（面板有没有被切出视口），量不到就等于没验证，
+  所以它先确认 Chrome 起得来，再断言 `skipped === 0`。
+- **`mutation`**：跑 `npm run mutate`，验证的是**测试的质量**，不是代码的功能。
+
+主 job 那道闸门为什么不是可选项：`node --test` 在用例被 skip 时**仍然退出 0**，
+`# skipped` 与 `# fail 0` 并列。宿主的主题包读不到时，外观断言会集体 skip、CI 一片
+绿，而那批断言**什么都没验证**。所以闸门不只看 `skipped`，还要求 TAP 报告存在、
+汇总行齐备、且用例数不为 0——否则「报告压根没生成」也会被当成 `skipped == 0` 而假绿。
+
+`npm run mutate` 是同一个问题的另一半答案：`npm test` 说「代码现在是对的」，变异
+检查说「测试真的抓得住错」。它把源码故意改坏——缓存键、回环闸门、分档切点、排序的
+null 分支、外观 token、焦点陷阱、汇率口径……——再跑一遍测试，按结果分类：
+
+- **`KILLED`**：测试变红，说明这条行为真的有测试在守；
+- **`SURVIVED`**：测试依然全绿，说明这条行为无人看守，脚本以非 0 退出，由人决定
+  是补测试还是记为已知缺口；
+- **`INVALID`**：变异体本身语法就错。**绝不能**当成 KILLED——那会把「整批文件
+  `SyntaxError`」误读成「断言生效」，制造虚假安全感；
+- **`ERROR`**：环境导致无法判定（TAP 汇总行缺失、基线里有用例被跳过等），与
+  `INVALID` 一样**绝不算 KILLED**。
+
+变异发生在 `mkdtemp` 出来的临时副本里（复制时排除 `.git`），工作区始终只读，也不需要
+stryker 之类的框架。
+
+跑它需要宿主主题包：本机装了 DSH 就有；CI 里单独全局装
+`@deepseek-ai/dsh-client-ui-theme`（钉死版本）并用 `UL_THEME_PATH` 显式指路。缺了它，
+外观断言只会 skip，而 skip 不会让测试失败——变异体本该变红却全绿，于是被误判成
+SURVIVED（假警报）。脚本因此在基线阶段就硬断言「没有静默跳过」并拒绝继续，判据不只看
+`skipped === 0`，还包括用例数不为 0、以及 TAP 里没有 `# SKIP` 痕迹：套件级
+`describe.skip` 跳过的用例不计入 `# skipped` 汇总，用例数也未必为 0，得数 `# SKIP`
+才看得见。
 
 ## License
 
