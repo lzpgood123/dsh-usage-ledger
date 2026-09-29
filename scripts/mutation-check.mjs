@@ -218,6 +218,34 @@ const MUTANTS = [
 		from: "\t\tconst models = parsed?.models ?? parsed;\n",
 		to: "\t\tconst models = parsed?.models;\n",
 	},
+	{
+		// #9 的两条手工变异自证。分组小计是呈现层的口径，坏了两处都不会报错：
+		// 一处把比率算成「各行命中率的平均」，一处给单渠道模型也加行。
+		id: "rollup-hitrate-averaged",
+		file: "src/client.js",
+		what: "分组小计的命中率改成组内各行命中率的**平均**，而不是「合计缓存读 ÷ 合计提示词」。实测 deepseek-v4.1-flash 加权 98.4% 对平均 49.2%，差 49.2 个百分点——平均会把一条几乎不复用缓存的渠道粉饰成一半命中",
+		killer: "test/client.test.js「小计命中率 = 合计缓存读 ÷ 合计提示词，不是各行命中率的平均（#9）」",
+		from: '\t\t\t\tcacheHitRate: prompt === 0 ? 0 : Math.round((cacheRead / prompt) * 1000) / 10,\n',
+		to: '\t\t\t\tcacheHitRate: member.length === 0 ? 0 : Math.round((member.reduce((sum, row) => sum + (valueOf(row, "cacheHitRate") ?? 0), 0) / member.length) * 10) / 10,\n',
+	},
+	{
+		id: "rollup-every-model",
+		file: "src/client.js",
+		what: "单渠道模型也插入小计行：数字与它下面那一行完全相同，表格高度凭空翻倍（本机 21 个模型里 18 个是单渠道）",
+		killer: "test/client.test.js「只有跨渠道的模型才有小计行，单渠道模型一行都不多给（#9）」（它还会连带打红分组排序、未定价占比与缓存写列等用例——条数会随测试增删而变，这里不写死）",
+		from: "\t\t\t\tconst crossChannel = member.length > 1;\n",
+		to: "\t\t\t\tconst crossChannel = true;\n",
+	},
+	{
+		// 比率列的组间排序值必须是加权值，不能是组内各行比率的和：后者的量纲没有意义
+		// （一行 100% + 一行 0% = 100，压过任何单行的 90%），会让组的次序与它显示的小计自相矛盾。
+		id: "rollup-ratio-summed",
+		file: "src/client.js",
+		what: "cacheHitRate 的组间排序值改成组内各行比率之和，组的次序与它显示的小计不再一致",
+		killer: "test/client.test.js「按「命中」列排序时，组的次序取小计的加权值，不是各行比率的和（#9）」",
+		from: '\t\t\t\tkey === "cacheHitRate"\n',
+		to: '\t\t\t\tkey !== "cacheHitRate"\n',
+	},
 ];
 
 /**

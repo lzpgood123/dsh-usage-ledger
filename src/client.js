@@ -515,6 +515,178 @@ body[data-ds-dark-theme] .ul-heat i[data-l="4"],body[data-ds-dark-theme] .ul-leg
 			});
 		}
 
+		/**
+		 * 把一组行的同一列求和；**没有任何一行有该列**时返回 null。
+		 *
+		 * 返回 null 而不是 0 是要紧的：未定价组的 cost 是 null，`sortRows` 会把 null
+		 * 恒排最后；若这里求和成 0，未定价组会与真正 ¥0 的组混在一起抢占表头——正是
+		 * `valueOf` 那条注释里要区分的东西。
+		 *
+		 * @param rows - 组内行。
+		 * @param key - 列键。
+		 * @returns 合计值，或 null。
+		 */
+		function sumOf(rows, key) {
+			let sum = null;
+			for (const row of rows) {
+				const value = valueOf(row, key);
+				if (value !== null) sum = (sum ?? 0) + value;
+			}
+			return sum;
+		}
+
+		/** 小计行的行标记；`DetailTable` 据此换一种渲染方式。 */
+		const ROLLUP_ROLE = "rollup";
+
+		/**
+		 * 这行是不是分组小计。
+		 *
+		 * 判别只有这一处：`DetailTable` 换渲染方式、进度条取最大值、未定价提示算占比，
+		 * 三处都要把「合计行」与「数据行」分开，各写一遍 `row?.role === "rollup"` 迟早会
+		 * 漏掉一处（漏了不会报错，只会让小计混进统计）。
+		 *
+		 * @param row - 表行。
+		 * @returns 是小计行时为 true。
+		 */
+		function isRollup(row) {
+			return row?.role === ROLLUP_ROLE;
+		}
+
+		/**
+		 * 只留数据行。
+		 *
+		 * @param rows - 表行数组。
+		 * @returns 去掉小计行后的新数组。
+		 */
+		function detailRows(rows) {
+			return rows.filter((row) => !isRollup(row));
+		}
+
+		/** 小计行名称列里的渠道位。 */
+		const ROLLUP_PROVIDER = "全部渠道";
+
+		/**
+		 * 由组内各行算出小计行。
+		 *
+		 * 缓存命中率**不是**各行缓存命中率的平均，而是「先把组内各行的缓存读与提示词各自求和，
+		 * 再相除」——这是 `CONTEXT.md`「缓存命中率」条目写下的不变量，也与 `src/scan.js`
+		 * 给单行算比率的口径一致。两者在真实数据上差得极多：实测
+		 * deepseek-v4.1-flash 加权 98.4%、直接平均 49.2%。
+		 *
+		 * cost 是**已按 4 位小数舍入**的各行成本之和，因此最多有 n×5e-5 的漂移
+		 * （≤4 行时 ≤0.0002），在 2 位小数的显示下不可见。issue #9 明确接受这一点，
+		 * 并禁止为此改动 payload（`buildPayload` 里没有、也不该有分组概念）。
+		 *
+		 * @param member - 组内明细行。
+		 * @param model - 组名（模型）。
+		 * @returns 小计行。
+		 */
+		function rollupOf(member, model) {
+			const sum = (key) => sumOf(member, key);
+			const cacheRead = sum("cacheReadTokens") ?? 0;
+			const prompt = (sum("inputTokens") ?? 0) + cacheRead;
+			return {
+				role: ROLLUP_ROLE,
+				model,
+				provider: ROLLUP_PROVIDER,
+				tokens: sum("tokens"),
+				requests: sum("requests"),
+				inputTokens: sum("inputTokens"),
+				outputTokens: sum("outputTokens"),
+				cacheReadTokens: sum("cacheReadTokens"),
+				cacheWriteTokens: sum("cacheWriteTokens"),
+				reasoningTokens: sum("reasoningTokens"),
+				cost: sum("cost"),
+				// 与单行的 `src/scan.js` 同口径：提示词为 0 时缓存命中率是 0，不是 NaN。
+				cacheHitRate: prompt === 0 ? 0 : Math.round((cacheRead / prompt) * 1000) / 10,
+			};
+		}
+
+		/**
+		 * 把一个组的行汇总出来，供排序与渲染共用。
+		 *
+		 * 组的排序值**不是**简单地把组内各行那一列相加：`cacheHitRate` 是**比率**，
+		 * 各行比率的和没有意义（一行 100% + 一行 0% 会得到 100，比任何单行的 90% 都
+		 * 「大」）。所以比率列取小计自己算出来的加权值，其余列才是组内求和——按
+		 * `缓存命中率` 排序时，组的次序必须与它显示的那一行小计一致。
+		 *
+		 * 全组都缺该列时为 null（`sortRows` 的「缺失恒排最后」因此也作用于组）。
+		 *
+		 * @param member - 组内明细行。
+		 * @param model - 组名（模型）。
+		 * @param key - 当前排序键。
+		 * @returns `{member, rollup, sortValue}`。
+		 */
+		function summarizeGroup(member, model, key) {
+			const rollup = rollupOf(member, model);
+			const sortValue =
+				key === "cacheHitRate"
+					? rollup.cacheHitRate
+					: member.some((row) => valueOf(row, key) !== null)
+						? member.reduce((sum, row) => sum + (valueOf(row, key) ?? 0), 0)
+						: null;
+			return { member, rollup, sortValue };
+		}
+
+		/**
+		 * 把「一行一条渠道 × 一个模型」摊平成带分组的行序列（#9 / ADR-0007）。
+		 *
+		 * 分模型表的聚合键是**渠道 + 模型**（见 `src/scan.js` 的桶键），所以同一模型的
+		 * 多条渠道天然是多行。名称列只写模型名时它们退化成同名重复行，用户没有区分手段；
+		 * 这里给每组加一行**非交互小计**，并把明细行标成 `provider/model` 以示区别。
+		 *
+		 * 三条不可动摇的约束：
+		 *
+		 * 1. **仅跨渠道时给小计**（`member.length > 1`）。本机 21 个模型里 18 个是单渠道，
+		 *    给它们也加小计等于凭空把表格高度翻倍，而数字与下面那行完全相同。
+		 * 2. **仅跨渠道的明细行写 `provider/model`**。单渠道模型加前缀只是把已有的列
+		 *    重复一遍；而 ADR-0007 不要第 11 列的渠道列，`provider/model` 是零新列的写法。
+		 * 3. **排序作用于分组**：先按组的合计排，组内再按同一列排。分组因此始终存在，
+		 *    点任何列都不会打散它；跨组看时数字序会跳，这是该设计的既定代价。
+		 *
+		 * payload **不变**：分组是呈现层的事，改 `aggregate` 的分组键会让
+		 * `src/index.js` 的渠道成本累加读到不再唯一的 `row.provider`。
+		 *
+		 * @param rows - `data.models`（每行一条渠道 × 一个模型）。
+		 * @param key - 当前排序键。
+		 * @param direction - `"asc" | "desc"`。
+		 * @returns 按渲染顺序摊平的行；小计行带 `role: "rollup"`。
+		 */
+		function groupModelRows(rows, key, direction) {
+			const groups = new Map();
+			for (const row of rows ?? []) {
+				const model = row?.model;
+				// 模型缺失的行不该被静默吞掉：单独成组，仍会渲染出来（`Map` 的键可以是 undefined）。
+				const bucket = groups.get(model);
+				if (bucket === undefined) groups.set(model, [row]);
+				else bucket.push(row);
+			}
+			const ordered = [...groups.entries()].map(([model, member]) => summarizeGroup(member, model, key));
+			// 这里把 `sortRows` 的「缺失恒排最后」比较语义**照抄**了一遍，因为排序键是
+			// 「组的汇总值」这个派生量，不在行对象上，`sortRows` 够不到它。代价是同一套
+			// null 语义有两份实现；收益是 `sortRows` 不必为一个只此一处的需求多长一个参数。
+			// 两边必须一起改：`test/client.test.js` 的「未定价行…恒排最后」与 `#9` 的
+			// 分组排序用例各守一边。
+			const sign = direction === "asc" ? 1 : -1;
+			ordered.sort((a, b) => {
+				if (a.sortValue === null && b.sortValue === null) return 0;
+				if (a.sortValue === null) return 1;
+				if (b.sortValue === null) return -1;
+				if (a.sortValue === b.sortValue) return 0;
+				return a.sortValue < b.sortValue ? -sign : sign;
+			});
+
+			const flat = [];
+			for (const { member, rollup } of ordered) {
+				const crossChannel = member.length > 1;
+				if (crossChannel) flat.push(rollup);
+				for (const row of sortRows(member, key, direction)) {
+					flat.push(crossChannel ? { ...row, displayName: `${row.provider}/${row.model}` } : row);
+				}
+			}
+			return flat;
+		}
+
 		//#endregion
 
 		//#region 组件
@@ -655,7 +827,11 @@ body[data-ds-dark-theme] .ul-heat i[data-l="4"],body[data-ds-dark-theme] .ul-leg
 		 * @returns 表格节点。
 		 */
 		function DetailTable({ rows, columns, nameOf, currency, sort, onSort }) {
-			const max = Math.max(1, ...rows.map((row) => row.tokens ?? 0));
+			// 最大值只取**明细行**：小计行带着组内合计，把它算进来会让每一根进度条都按
+			// 「组的总量」而不是「最大的单个模型」来缩放——跨渠道组越大，组内明细与其它
+			// 单渠道行的条就越短，读起来像是这些行变小了。进度条是「这一行相对最大一行」
+			// 的视觉刻度，参照物必须是同级的明细行。
+			const max = Math.max(1, ...detailRows(rows).map((row) => row.tokens ?? 0));
 			const table = h(
 				"table",
 				{ className: "ul-table" },
@@ -697,8 +873,29 @@ body[data-ds-dark-theme] .ul-heat i[data-l="4"],body[data-ds-dark-theme] .ul-leg
 				h(
 					"tbody",
 					null,
-					rows.map((row, index) =>
-						h(
+					rows.map((row, index) => {
+						// 分组小计行（#9 / ADR-0007）：它是**非交互**的合计，不是可点的行。
+						// 所以这里不放按钮、不放 tabIndex，与名称列 `sortable:false` 同一个道理。
+						// 名称写成 `〔全部渠道〕模型`，与它下面那些 `provider/model` 明细行区分开——
+						// 两组同名是读屏用户最容易混淆的地方。
+						//
+						// 只加类名与 `<strong>`，不自己挑颜色／背景：宿主 token 是硬约束
+						// （见 ADR-0006），而这里没有新信息需要承载——小计与明细靠前缀、
+						// 缩进与加粗就分得开，多一个自选背景只会再多一处对比度风险。
+						if (isRollup(row)) {
+							return h(
+								"tr",
+								{ key: index, className: "ul-rollup" },
+								h(
+									"td",
+									null,
+									// title 与明细行一样给全名：这行名最长，窄视口下会被截断。
+									h("span", { className: "ul-name", title: nameOf(row) }, h("strong", null, `〔${ROLLUP_PROVIDER}〕${nameOf(row)}`)),
+								),
+								columns.slice(1).map((column) => h("td", { key: column.key }, column.render(row, max, currency))),
+							);
+						}
+						return h(
 							"tr",
 							{ key: index },
 							h(
@@ -709,8 +906,8 @@ body[data-ds-dark-theme] .ul-heat i[data-l="4"],body[data-ds-dark-theme] .ul-leg
 							columns.slice(1).map((column) =>
 								h("td", { key: column.key }, column.render(row, max, currency)),
 							),
-						),
-					),
+						);
+					}),
 				),
 			);
 			// 表格自己横向滚动。以前 `overflow:auto` 在 `.ul-panel` 上，表格一超宽就把
@@ -800,7 +997,13 @@ body[data-ds-dark-theme] .ul-heat i[data-l="4"],body[data-ds-dark-theme] .ul-leg
 			};
 
 			const providerRows = data === null ? [] : sortRows(data.providers ?? [], sort.providers.key, sort.providers.direction);
-			const modelRows = data === null ? [] : sortRows(data.models ?? [], sort.models.key, sort.models.direction);
+			// 分模型表按模型分组渲染（#9 / ADR-0007）：明细行是小计 + 组内行，
+			// 组内已经排好序，所以**不能**再对结果调用一次 sortRows——那会把小计行也
+			// 拖进数值比较，并且打散分组。
+			const modelRows = data === null ? [] : groupModelRows(data.models ?? [], sort.models.key, sort.models.direction);
+			// 未定价提示只认明细行：小计行带着组内合计，混进去会让「未定价占多少 token」
+			// 的分母凭空翻倍（分母变大 → 占比减半），而那个占比正是用户决定先补哪个价格的依据。
+			const modelDetailRows = detailRows(modelRows);
 
 			const tabs = [
 				["today", "今日"],
@@ -922,18 +1125,20 @@ body[data-ds-dark-theme] .ul-heat i[data-l="4"],body[data-ds-dark-theme] .ul-leg
 									h(
 										"div",
 										{ className: "ul-sec" },
-										h("h4", null, "分模型", h("span", { className: "hint" }, `${modelRows.length} 个`)),
+										h("h4", null, "分模型", h("span", { className: "hint" }, `${modelDetailRows.length} 个`)),
 										h(DetailTable, {
 											rows: modelRows,
 											columns,
-											nameOf: (row) => row.model,
+											// 跨渠道的明细行带 `displayName`（`provider/model`），单渠道行原样——
+											// 一行一渠道的粒度不变，只是命名把渠道写了出来。
+											nameOf: (row) => row?.displayName ?? row?.model,
 											currency: data.cost?.currency,
 											sort: sort.models,
 											onSort: (key) => toggleSort("models", key),
 										}),
 									),
 									data.cost?.priced !== true || (data.cost?.unpriced ?? []).length > 0
-										? h(UnpricedNotice, { cost: data.cost, models: modelRows, currency: data.cost?.currency })
+										? h(UnpricedNotice, { cost: data.cost, models: modelDetailRows, currency: data.cost?.currency })
 										: null,
 									h(
 										"div",

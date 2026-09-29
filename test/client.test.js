@@ -834,6 +834,296 @@ test("未定价行在 cost 列两个方向上都恒排最后，且不与有效�
 	}
 });
 
+//#region 分模型表的分组（#9 / ADR-0007）
+
+/**
+ * 一份「两个跨渠道模型 + 一个单渠道模型」的载荷（#9）。
+ *
+ * 数值刻意让**加权缓存命中率与各行缓存命中率的平均分得很开**——这是这条口径唯一能被证伪的
+ * 方式。注意小计把比率按 `Math.round(… × 1000) / 10` 只保留**一位**小数，所以加权值
+ * 若落在 0.05% 这种量级就会被舍成 0%，与「平均值」不再可区分；下面两组都避开了那个坑
+ * （第二组落在 1%）。
+ *
+ * - `m-shared`：合计缓存读 1_300_000、提示词 1_300_000 + 167 + 1 = 1_300_168
+ *   → 加权 **100%**；两行各自的缓存命中率是 100% 与 99% → 平均 **99.5%**。
+ * - `m-alt`：合计缓存读 300、提示词 (30_000 + 0) + (0 + 300) = 30_300
+ *   → 加权 0.990…% → **1%**；两行是 0% 与 100% → 平均 **50%**。这一组是决定性的
+ *   （相差 49 个百分点），`m-shared` 那组只差 0.5 个百分点。
+ * - `m-solo` 只有一条渠道，用来钉住「单渠道不给小计」。
+ *
+ * 行数据里的 `cacheHitRate` 是**展示用**的，宿主端给什么就是什么；小计不读它，
+ * 只读四列 token 现算——这正是不变量（合计比率 ≠ 比率平均）的落点。
+ *
+ * @returns 载荷。
+ */
+function payloadWithGroupedModels() {
+	const payload = payloadWith({ priced: true, total: 9, currency: "CNY", unpriced: [] });
+	payload.providers = [
+		{ provider: "relay-a", tokens: 1_300_000, requests: 10, inputTokens: 167, outputTokens: 0, cacheReadTokens: 1_300_000, cacheWriteTokens: 0, reasoningTokens: 0, cacheHitRate: 100, cost: 1 },
+		{ provider: "relay-b", tokens: 100, requests: 1, inputTokens: 1, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0, cacheHitRate: 0, cost: 2 },
+	];
+	payload.models = [
+		{ provider: "relay-a", model: "m-shared", tokens: 1_300_000, requests: 10, inputTokens: 167, outputTokens: 0, cacheReadTokens: 1_300_000, cacheWriteTokens: 0, reasoningTokens: 0, cacheHitRate: 100, cost: 1 },
+		{ provider: "relay-b", model: "m-shared", tokens: 100, requests: 1, inputTokens: 1, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0, cacheHitRate: 99, cost: 2 },
+		{ provider: "relay-a", model: "m-alt", tokens: 30_000, requests: 2, inputTokens: 30_000, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0, cacheHitRate: 0, cost: 3 },
+		{ provider: "relay-b", model: "m-alt", tokens: 100, requests: 1, inputTokens: 0, outputTokens: 0, cacheReadTokens: 300, cacheWriteTokens: 0, reasoningTokens: 0, cacheHitRate: 100, cost: 3 },
+		{ provider: "relay-a", model: "m-solo", tokens: 50_000, requests: 1, inputTokens: 50_000, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0, cacheHitRate: 0, cost: 0 },
+	];
+	return payload;
+}
+
+/** 分模型表的小计行（`tr.ul-rollup`）。 */
+function rollupRows(table) {
+	return findAll(table, (element) => element.type === "tr" && element.props?.className === "ul-rollup");
+}
+
+/** 小计行组名的前缀；与 `src/client.js` 的 `ROLLUP_PROVIDER` 对应。 */
+const ROLLUP_PREFIX = "〔全部渠道〕";
+
+/** 小计行的组名（去掉前缀）。 */
+function rollupModel(row) {
+	return cellsOf(row)[0].replace(ROLLUP_PREFIX, "");
+}
+
+/**
+ * 分模型表的**渲染顺序**：明细行给 `provider/model`，小计行给 `＝模型`。
+ *
+ * 分组是否被打散只能从渲染顺序看出来——断言 `aria-sort` 只能证明表头说自己是什么
+ * 方向，证明不了小计行还紧挨着它的成员。用 `＝` 标出小计，顺序一眼可读。
+ *
+ * @param table - `table` 元素。
+ * @returns 行序数组。
+ */
+function renderedModelOrder(table) {
+	return findAll(table, (element) => element.type === "tr")
+		.filter((row) => findAll(row, (element) => element.type === "td").length > 0)
+		.map((row) => (row.props?.className === "ul-rollup" ? `＝${rollupModel(row)}` : textOf(findAllByClass(row, "ul-name")[0])));
+}
+
+/** 取第 `index` 张表的某一格文本（0 起）。 */
+function cellsOf(row) {
+	return findAll(row, (element) => element.type === "td").map((element) => textOf(element));
+}
+
+/**
+ * 找某一格所在列的下标，按表头文字（与 `headerFor` 同一套前缀匹配）。
+ *
+ * 找不到就抛：返回 -1 会让 `cells[columnIndex(...)]` 静默变成 undefined，
+ * 断言可能因为「两边都是 undefined」而通过——比直接报错糟糕得多。
+ *
+ * @param table - `table` 元素。
+ * @param label - 表头文字（可带排序箭头）。
+ * @returns 列下标。
+ */
+function columnIndex(table, label) {
+	const index = findAll(table, (element) => element.type === "th")
+		.map((element) => textOf(element))
+		.findIndex((text) => text.startsWith(label));
+	assert.ok(index >= 0, `表里找不到表头「${label}」`);
+	return index;
+}
+
+test("分模型表名称列写 provider/model，同一模型的多条渠道因此可区分（#9）", async (t) => {
+	const { render } = await renderInteractive(t, payloadWithGroupedModels(), "Panel", { onClose: () => {} });
+	const tables = findAllByClass(render(), "ul-table");
+	assert.equal(tables.length, 2, "分渠道与分模型各一张表");
+
+	const names = renderedModelOrder(tables[1]).filter((name) => !name.startsWith("＝"));
+	assert.deepEqual(
+		names.includes("relay-a/m-shared") && names.includes("relay-b/m-shared"),
+		true,
+		`跨渠道模型的两行必须分别写成 provider/model，否则两行同名、用户无从区分。实际行名：${names.join(" / ")}`,
+	);
+	// 反向对照：分渠道表的名字**不能**跟着变成 provider/xxx——那里一行就是一条渠道。
+	assert.deepEqual(renderedRowNames(tables[0]).sort(), ["relay-a", "relay-b"], "分渠道表的名字仍是裸渠道名");
+});
+
+test("只有跨渠道的模型才有小计行，单渠道模型一行都不多给（#9）", async (t) => {
+	const { render } = await renderInteractive(t, payloadWithGroupedModels(), "Panel", { onClose: () => {} });
+	const table = findAllByClass(render(), "ul-table")[1];
+
+	const rollups = rollupRows(table);
+	assert.equal(rollups.length, 2, `三个模型里只有 m-shared 与 m-alt 跨渠道，必须恰好两行小计。实际：${rollups.map((row) => cellsOf(row)[0]).join(" / ")}`);
+	assert.deepEqual(
+		rollups.map((row) => cellsOf(row)[0]).sort(),
+		["〔全部渠道〕m-alt", "〔全部渠道〕m-shared"],
+		"小计的组名必须点明是哪一行的合计，且不能与明细行同名（否则读屏听到两组一模一样的名字）",
+	);
+
+	// 单渠道模型（m-solo）绝对不许有小计：它的小计与下面那行数字完全相同，
+	// 给了只是噪音与双倍行高（18/21 的模型是单渠道）。
+	assert.equal(
+		rollups.some((row) => cellsOf(row)[0].includes("m-solo")),
+		false,
+		"单渠道模型出现了小计行：本机 18/21 的模型如此，等于凭空把表格高度翻倍。",
+	);
+	assert.equal(renderedModelOrder(table).filter((name) => name.endsWith("m-solo")).length, 1, "m-solo 应当恰好一行明细");
+});
+
+test("小计的缓存命中率 = 合计缓存读 ÷ 合计提示词，不是各行缓存命中率的平均（#9）", async (t) => {
+	const { render } = await renderInteractive(t, payloadWithGroupedModels(), "Panel", { onClose: () => {} });
+	const table = findAllByClass(render(), "ul-table")[1];
+	const hit = columnIndex(table, "命中");
+	assert.ok(hit >= 0, "分模型表里没有「命中」列");
+
+	const byName = new Map(rollupRows(table).map((row) => [cellsOf(row)[0], cellsOf(row)]));
+
+	// m-alt：合计缓存读 300 / 合计提示词 (30_000 + 0) + (0 + 300) = 30_300 → 0.990…% → **1%**。
+	// 若改成「各行缓存命中率的平均」，这里会是 (0 + 100) / 2 = **50%**——相差 49 个百分点，
+	// 正是实测里 deepseek-v4.1-flash「加权 98.4% 对平均 49.2%」那类错误的缩小版。
+	assert.equal(
+		byName.get("〔全部渠道〕m-alt")[hit],
+		"1%",
+		"小计的缓存命中率必须先把组内各行 token 求和再相除（Σ缓存读 ÷ Σ提示词）。" +
+			"写成各行缓存命中率的平均会得到 50%，把一条几乎不用缓存的渠道粉饰成一半命中——" +
+			"CONTEXT.md 的「缓存命中率」条目已把这条写成不变量。",
+	);
+
+	// m-shared：合计缓存读 1_300_000 / 合计提示词 1_300_000 + 167 + 1 = 1_300_168 → 99.987…% → 100%。
+	// 它同样能证伪「平均」（两行是 100% 与 99% → 99.5%），只是差距只有 0.5 个百分点，
+	// 不如上面那条决定性——两条都留着，省得将来有人「顺手」删掉其中一条。
+	assert.equal(byName.get("〔全部渠道〕m-shared")[hit], "100%", "m-shared 的小计的缓存命中率应为 100%（平均则是 99.5%）");
+});
+
+test("小计的其余数值列是组内各行之和，cost 用已舍入值直接相加（#9）", async (t) => {
+	const { render } = await renderInteractive(t, payloadWithGroupedModels(), "Panel", { onClose: () => {} });
+	const table = findAllByClass(render(), "ul-table")[1];
+	const cells = cellsOf(rollupRows(table).find((row) => cellsOf(row)[0] === "〔全部渠道〕m-shared"));
+
+	// tokens 列走 `fmtTokens` 的万/亿分档：1_300_100 显示成「130.0 万」，
+	// 与组内最大的那一行（也是 130.0 万）形成了对比陷阱——单看小计像是抄了第一行，
+	// 所以下面的断言必须挑一个**只有合计才对**的数字（请求 11、输入 168）。
+	assert.equal(cells[columnIndex(table, "tokens")], "130.0 万", "tokens 之和（1,300,100 按万档显示）");
+	assert.equal(cells[columnIndex(table, "请求")], "11", "请求数之和：10 + 1 = 11，任何单行都给不出这个数");
+	assert.equal(cells[columnIndex(table, "输入")], "168", "输入之和：167 + 1 = 168");
+	assert.equal(cells[columnIndex(table, "缓存读")], "130.0 万", "缓存读之和");
+	// cost：1 + 2 = 3。两行都已按 4 位小数舍入，直接相加最多 n×5e-5 的漂移，
+	// 2 位小数显示下不可见（issue #9 明确接受，且不许为此改 payload）。
+	assert.equal(cells[columnIndex(table, "官方价折算")], "¥3.00", "cost 用各行已舍入值直接相加");
+});
+
+test("小计行不是可聚焦元素、不带排序按钮，与名称列同一套处理（#9）", async (t) => {
+	const { render } = await renderInteractive(t, payloadWithGroupedModels(), "Panel", { onClose: () => {} });
+	const table = findAllByClass(render(), "ul-table")[1];
+
+	// 先钉住「确实有小计行」：没有这一条，下面的循环会在空数组上转一圈然后全绿——
+	// 那不是「小计行不可交互」，而是「小计行不存在」。
+	const rollups = rollupRows(table);
+	assert.equal(rollups.length, 2, "先要真的有跨渠道小计行，下面的可交互性断言才有意义");
+
+	for (const row of rollups) {
+		assert.equal(
+			findAll(row, (element) => element.type === "button").length,
+			0,
+			"小计行里出现了按钮：它会被 Tab 到、被点击，但点了不改变任何东西——这是对键盘用户说谎（与名称列 sortable:false 同理）。",
+		);
+		assert.equal(
+			findAll(row, (element) => element.type === "th").length,
+			0,
+			"小计行里出现了 th：它会被读屏当成表头，而它只是一行合计。",
+		);
+		assert.equal(findAll(row, (element) => element.props?.tabIndex !== undefined).length, 0, "小计行不该有可聚焦元素");
+	}
+
+	// 反向核对：明细行里确实有可点的排序按钮之外的链接/按钮吗？没有——这条只是
+	// 证明上面的「找不到按钮」不是因为整张表都退化成了纯文本。
+	assert.ok(findAll(table, (element) => element.props?.className === "ul-sort").length >= 9, "表头仍应有排序按钮");
+});
+
+test("排序作用于分组：先按组合计排，组内按同一列排，分组不被打散（#9）", async (t) => {
+	const { render } = await renderInteractive(t, payloadWithGroupedModels(), "Panel", { onClose: () => {} });
+	const table = () => findAllByClass(render(), "ul-table")[1];
+
+	// 各组的 tokens 合计：m-shared 1_300_100 ＞ m-solo 50_000 ＞ m-alt 30_100。
+	// 单渠道的 m-solo 没有小计行，所以它只出现在行序里，不进 groupOrder。
+	const groupOrder = () => rollupRows(table()).map((row) => rollupModel(row));
+	assert.deepEqual(groupOrder(), ["m-shared", "m-alt"], "初始 tokens 降序：跨渠道组按各组合计排");
+
+	// 表里明细行的顺序：跨渠道组的两个成员必须紧挨在小计行下面，不许被拆开。
+	assert.deepEqual(
+		renderedModelOrder(table()),
+		["＝m-shared", "relay-a/m-shared", "relay-b/m-shared", "m-solo", "＝m-alt", "relay-a/m-alt", "relay-b/m-alt"],
+		"小计与它的成员必须连在一起，且单渠道的 m-solo 不带任何前缀",
+	);
+
+	// 换成「缓存读」列：组按各组合计排——m-shared 1_300_000 ＞ m-alt 300 ＞ m-solo 0。
+	// 单渠道组照样参与排序（它只是没有小计行），所以 m-solo 会整组挪到最后。
+	sortButtonFor(table(), "缓存读").props.onClick();
+	assert.deepEqual(groupOrder(), ["m-shared", "m-alt"], "按缓存读降序，组序必须按组**合计**（1_300_000 ＞ 300），不是按某一行");
+
+	assert.deepEqual(
+		renderedModelOrder(table()),
+		["＝m-shared", "relay-a/m-shared", "relay-b/m-shared", "＝m-alt", "relay-b/m-alt", "relay-a/m-alt", "m-solo"],
+		"换列后组内按同一列排（relay-b 的 300 在 relay-a 的 0 前面），单渠道组按自己的合计沉到最后，分组仍不被打散",
+	);
+
+	// 升序：组序整个翻过来，组内也翻过来——「排序作用于分组」是两个方向都成立的。
+	sortButtonFor(table(), "缓存读").props.onClick();
+	assert.deepEqual(groupOrder(), ["m-alt", "m-shared"], "升序时组序必须翻转");
+	assert.deepEqual(
+		renderedModelOrder(table()),
+		["m-solo", "＝m-alt", "relay-a/m-alt", "relay-b/m-alt", "＝m-shared", "relay-b/m-shared", "relay-a/m-shared"],
+		"升序时组内也要按同一列排，单渠道组按合计升到最前",
+	);
+});
+
+test("小计行不计进「未定价」提示的 token 占比（否则总量凭空翻倍）（#9）", async (t) => {
+	const payload = payloadWithGroupedModels();
+	// 让一个**单渠道**模型未定价，并让提示显形。
+	payload.models.find((row) => row.model === "m-solo").cost = null;
+	payload.cost = { priced: true, total: 3, currency: "CNY", unpriced: ["m-solo"] };
+
+	const { render } = await renderInteractive(t, payload, "Panel", { onClose: () => {} });
+	const node = render();
+	assert.equal(rollupRows(findAllByClass(node, "ul-table")[1]).length, 2, "先确认分组小计确实渲染出来了，这条断言才有对象");
+	const notice = textOf(findAllByClass(node, "ul-warn")[0]);
+
+	// 期望值从载荷现算，不写死——改了上面 fixture 的数值，这两条断言自己跟着对。
+	const detailTokens = payload.models.reduce((sum, row) => sum + row.tokens, 0);
+	const unpricedTokens = payload.models.filter((row) => row.cost === null).reduce((sum, row) => sum + row.tokens, 0);
+	const share = Math.round((unpricedTokens / detailTokens) * 100);
+	const inflated = Math.round((unpricedTokens / (detailTokens + unpricedTokens * 2)) * 100);
+
+	// 分母若混进小计行（两行分别等于各自组的合计），总量会凭空涨一大截，占比随之下滑
+	// ——而那个占比正是用户决定先补哪个价格的依据。
+	assert.match(notice, new RegExp(`占 ${share}% 的 token 量`), `未定价占比必须只按明细行算。实际提示：${notice}`);
+	if (inflated !== share) {
+		assert.equal(new RegExp(`占 ${inflated}% `).test(notice), false, "小计行被算进了未定价占比：分组行是合计，不是数据行，不该参与统计");
+	}
+});
+
+test("按「命中」列排序时，组的次序取小计的加权值，不是各行比率的和（#9）", async (t) => {
+	// 比率列不能把组内各行相加：一行 100% + 一行 0% 会得到 100，比任何单行的 90% 都
+	// 「大」。这里造一个正好踩中这个陷阱的载荷：
+	//   m-two：两行，合计缓存读 200 / 合计提示词 400 → 加权 50%；各行比率之和 = 100。
+	//   m-one：单行 90%。
+	// 正确的降序是 m-one(90) → m-two(50)；若按「各行之和」排，m-two 会跑到最前面，
+	// 而它自己显示的小计是 50%——组的次序与组显示的数字自相矛盾。
+	const payload = payloadWith({ priced: true, total: 0, currency: "CNY", unpriced: [] });
+	payload.models = [
+		{ provider: "relay-a", model: "m-two", tokens: 100, requests: 1, inputTokens: 100, outputTokens: 0, cacheReadTokens: 100, cacheWriteTokens: 0, reasoningTokens: 0, cacheHitRate: 50, cost: 0 },
+		{ provider: "relay-b", model: "m-two", tokens: 100, requests: 1, inputTokens: 100, outputTokens: 0, cacheReadTokens: 100, cacheWriteTokens: 0, reasoningTokens: 0, cacheHitRate: 50, cost: 0 },
+		{ provider: "relay-a", model: "m-one", tokens: 100, requests: 1, inputTokens: 10, outputTokens: 0, cacheReadTokens: 90, cacheWriteTokens: 0, reasoningTokens: 0, cacheHitRate: 90, cost: 0 },
+	];
+
+	const { render } = await renderInteractive(t, payload, "Panel", { onClose: () => {} });
+	const table = () => findAllByClass(render(), "ul-table")[1];
+
+	sortButtonFor(table(), "命中").props.onClick();
+
+	// m-one 是单渠道组（没有小计行），所以只能从整表的渲染顺序看：它必须排在
+	// m-two 的小计行与两行明细之前。若组的次序取「各行比率之和」，m-two 的 100
+	// 会压过 m-one 的 90，整组跳到表头。
+	assert.deepEqual(
+		renderedModelOrder(table()),
+		["m-one", "＝m-two", "relay-a/m-two", "relay-b/m-two"],
+		"按缓存命中率降序时，组的次序必须与各组小计显示的加权值一致（90% ＞ 50%）",
+	);
+	assert.equal(cellsOf(rollupRows(table())[0])[columnIndex(table(), "命中")], "50%", "m-two 的小计显示的加权命中率是 50%");
+});
+
+//#endregion
+
 test("遮罩对辅助技术隐藏、点击可关闭，且不是唯一出口（× 与 Esc 都在）", async (t) => {
 	const closed = [];
 	const { render } = await renderInteractive(t, payloadWithRows(), "Panel", { onClose: () => closed.push("closed") });

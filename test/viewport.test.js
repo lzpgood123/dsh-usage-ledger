@@ -395,6 +395,13 @@ window.__ul = (() => {
 					return head === null ? 0 : head.querySelectorAll("th").length;
 				})(),
 				rows: document.querySelectorAll(".ul-table tbody tr").length,
+				// #9 的分组行与跨渠道命名（注意：这段代码在模板字符串里，注释不能带反引号）。
+				// 留着它们是为了让下面的断言能证明**量的确实是新渲染路径**——若分组没生效，
+				// 量到的还是旧布局，「不越界」就成了对旧代码的背书。
+				rollups: document.querySelectorAll(".ul-table tbody tr.ul-rollup").length,
+				crossChannelNames: Array.from(document.querySelectorAll(".ul-table .ul-name"))
+					.map((node) => node.textContent)
+					.filter((text) => text.includes("/")),
 				wrapScrollsX: wrap === null ? null : wrap.scrollWidth > wrap.clientWidth,
 				styleInjected: document.getElementById("usage-ledger-style") !== null,
 			};
@@ -411,11 +418,17 @@ window.__ul = (() => {
  *
  * 记录刻意造得**宽**：长模型名 + 十列数值，这是让表格与面板承压的输入。
  *
+ * 第一个模型刻意走**两条渠道**（#9）：分模型表因此把名称渲染成
+ * `provider/model`（比裸模型名更长），并多出一行分组小计。这正是宽度预算最紧的
+ * 形态——若只造单渠道模型，`#9` 之后的新渲染路径在这套几何断言下根本没被量到。
+ *
  * @returns 可序列化的载荷。
  */
 function realisticPayload() {
 	const models = [
 		["deepseek-v4.1-flash-thinking-preview", "relay-a-official"],
+		// 同一模型的第二条渠道：触发 `provider/model` 命名与小计行（#9 / ADR-0007）。
+		["deepseek-v4.1-flash-thinking-preview", "relay-c-cheap"],
 		["claude-sonnet-4-6-20260101", "relay-b-discount"],
 		["gpt-5.2-codex-high", "relay-a-official"],
 		["gemini-3.0-pro-exp", "anthropic-direct"],
@@ -612,6 +625,13 @@ test("视口：480/768/900/1400 四档下面板都不越出视口边界（真实
 		assert.ok(result.styleInjected, `${result.width}px：样式没有注入，量到的是无样式 DOM，几何断言无意义`);
 		assert.ok(result.tables >= 2, `${result.width}px：只渲染出 ${result.tables} 张表，载荷或渲染桩已失效`);
 		assert.equal(result.cols, 10, `${result.width}px：明细表应有 10 列，实际 ${result.cols} 列`);
+		// `#9` 之后分模型表的名称更长（`provider/model`）且多一行小计，这正是宽度最紧
+		// 的形态。断言它确实渲染出来了：否则下面量到的是旧布局，「不越界」等于没验证新路径。
+		assert.equal(result.rollups, 1, `${result.width}px：跨渠道模型应有且仅有一行分组小计，实际 ${result.rollups} 行`);
+		assert.ok(
+			result.crossChannelNames.includes("relay-a-official/deepseek-v4.1-flash-thinking-preview"),
+			`${result.width}px：跨渠道明细行没有渲染成 provider/model，实际名称：${result.crossChannelNames.join(" / ")}`,
+		);
 	}
 
 	// 主断言：fixed 浮层的左右边缘必须落在视口内。
