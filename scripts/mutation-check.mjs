@@ -192,6 +192,32 @@ const MUTANTS = [
 		from: '\t\tif (typeof rate !== "number" || !Number.isFinite(rate)) return undefined;\n',
 		to: '\t\tif (typeof rate !== "number" || !Number.isFinite(rate)) return 0;\n',
 	},
+	{
+		// #7 的手工变异自证，落成常驻护栏。它们守的都是**静默降级**：
+		// 退化不会报错，只会悄悄少算钱，所以必须一直有人盯着。
+		id: "pricing-file-nonstring-path-read",
+		file: "src/index.js",
+		what: "路径守卫只挡 undefined/null，非字符串（数字/对象/数组/函数）会一路走到 readFile：读它抛出的错误被同一个 catch 吞掉，转成一次不该有的 warn",
+		killer: "test/pricing-file.test.js「拿不到路径（undefined / null / \"\" / 非字符串）→ 空表且不 warn，不得去读任何路径」——判据是 `warned` 必须为空。返回值形状在变异前后都是空表，只看返回值永远杀不掉这个变异体",
+		from: '\tif (typeof file !== "string" || file === "") return { models: {}, aliases: {}, rates: {} };\n',
+		to: "\tif (file === undefined || file === null) return { models: {}, aliases: {}, rates: {} };\n",
+	},
+	{
+		id: "pricing-file-enoent-warned",
+		file: "src/index.js",
+		what: "ENOENT 也走 warn（放宽成 `error !== undefined`）：没配价格表是最常见的正常情况，却变成每次启动都刷一行日志",
+		killer: "test/pricing-file.test.js「文件不存在（ENOENT）→ 空表且不 warn——不存在是常态，不该刷日志」",
+		from: '\t\tif (error?.code !== "ENOENT") logger?.warn?.(',
+		to: "\t\tif (error !== undefined) logger?.warn?.(",
+	},
+	{
+		id: "pricing-file-models-fallback-dropped",
+		file: "src/index.js",
+		what: "删掉 `?? parsed` 顶层回退：没有 models 键的价格表整个失效，金额一栏全变「—」而没有任何报错",
+		killer: "test/pricing-file.test.js「{models:…} 正常解析；无 models 键时把顶层当价格表（parsed?.models ?? parsed 回退）」",
+		from: "\t\tconst models = parsed?.models ?? parsed;\n",
+		to: "\t\tconst models = parsed?.models;\n",
+	},
 ];
 
 /**

@@ -142,6 +142,7 @@ test/scan.test.js           扫描策略：缓存、淘汰、容错
 test/list-sessions.test.js  会话文件枚举与跨代去重
 test/payload.test.js        载荷组装：范围折算、371 天窗口、渠道计价
 test/cost-of.test.js        计价口径：缺价格或缺汇率一律留空，不拿 0 冒充免费
+test/pricing-file.test.js   价格表读取与路径解析：读不到价格表只降级，绝不拖垮面板
 test/screen-request.test.js 回环闸门：只放行精确回环地址，局域网一律 403
 test/client.test.js         浏览器端导出的纯函数与组件
 test/appearance.test.js     外观契约：宿主 token 存在性、色阶可辨、键盘可达
@@ -204,6 +205,20 @@ CI 因此把浏览器用例拆进独立的 job（见下）。
   陷阱的汇率表证明币种相同时实现**根本不查 `rates`**。这两处一旦退化成 `?? 0`，
   未定价的渠道会被静默算成 ¥0，正是要避免的「0 冒充免费」。理由见
   `docs/adr/0001-official-list-price-accounting.md`。
+- **价格表读取与路径解析**（`pricing-file.test.js`）：`loadPricingFile` 的每条分支
+  都是**静默降级**——坏了不报错，只会悄悄少算钱。用例钉住方向相反的几条判据：拿不到
+  路径（`undefined` / `""` / 非字符串）→ 空表且**不 warn**（非字符串真去读会抛错，
+  而那个错会被同一个 catch 吞掉、转成一次 warn，所以「不该 warn」才是「没去读」的
+  可观测形式）；文件不存在（ENOENT）→ 空表且**不 warn**（不存在是常态，warn 会变成
+  每次启动刷日志）；损坏或结构不可用（非法 JSON、顶层是数组/数字、`models` 不是
+  对象）→ 空表 + warn，**绝不抛错**（价格读不到不该让整条路由 500）。`aliases` /
+  `rates` 各自独立降级为 `{}`，**不影响 `models`**——整表作废会让金额一栏全变「—」
+  而没有任何报错。`resolveSessionsRoot` / `resolvePricingFile` 守的是 `$DSH_HOME`
+  回退与「`false` = 显式不要价格表 ≠ 没配」的区别，环境变量改写一律 `withEnv` 包住
+  并在 finally 里连「键是否存在」一起还原，不泄漏给同进程的其它用例。
+  这些退化都固化在 `scripts/mutation-check.mjs` 里（`pricing-file-*` 三个变异体），
+  手工自证因此变成常驻护栏。`file === ""` 那半句是**例外**：`readFile("")` 本身就是
+  ENOENT，与正常吞掉 ENOENT 的结果完全一样，进程外无法区分，所以没有对应变异体。
 - **回环闸门**（`screen-request.test.js`）：就是「HTTP 接口」那节的回环闸门——
   `screenRequest` 是面板唯一的安全边界。判据是三个字面量的**精确匹配**
   （`127.0.0.1` / `::1` / `::ffff:127.0.0.1`），不是网段匹配也不是前缀匹配，所以
