@@ -90,7 +90,19 @@ GET /api/usage-ledger?range=today|week|month|all|custom&from=YYYY-MM-DD&to=YYYY-
 
 ## 定价（可选）
 
-价格表放在独立 JSON 文件里，改完下一次请求即生效，不用动 profile 配置、不用重启：
+价格表放在独立 JSON 文件里，改完下一次请求即生效，不用动 profile 配置、不用重启。
+
+**仓库自带一份参考底表** `usage-ledger-pricing.json`（76 个模型 + 20 条别名 + 汇率表）。新机器上不必从零填表，拷过去即可：
+
+```sh
+cp usage-ledger-pricing.json "$DSH_HOME/usage-ledger-pricing.json"
+```
+
+⚠️ **运行时读的始终是 `$DSH_HOME` 那份，不是仓库里这份**。仓库里的是**分发用的底表**，`resolvePricingFile()` 的默认路径不受它影响；也**不会**在找不到 `$DSH_HOME` 那份时回退读包内——回退会让「用户以为自己改了价格、实际读的是包内底表」变成静默故障。同理它**不进 npm 包**（`files` 只发布 `src/` 与 `cordis.patch.yml`）：它是用户可编辑的数据，塞进 `node_modules` 会在每次 `pnpm add` 时被覆盖。
+
+表本身携带溯源信息（`_generated`、`_sources`、逐条 `models[*].source` 与 `confidence`），是按各厂商官方定价页人工编译的，**没有生成脚本**——更新时整份替换。
+
+文件格式：
 
 ```json
 {
