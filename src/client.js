@@ -31,6 +31,24 @@ window.__ModuleLoader__.load({
 
 		const API = "/api/usage-ledger";
 
+		/**
+		 * 搜索下拉的渲染上限（规格 §12）。
+		 *
+		 * 上限不是性能考虑，是**可用性**：候选表有 147 行，全铺出来用户只能自己滚。
+		 * 超出时明确说「还有 N 条，请细化关键词」，而不是静默截断——静默截断会让
+		 * 用户以为「搜不到 = 不存在」。
+		 */
+		const MAX_SEARCH_ROWS = 50;
+
+		/**
+		 * `note` / `reason` 的长度上限，与服务端 V14 **同一个数**。
+		 *
+		 * 两端各写一遍是契约测试盯住的既有形态（客户端不能 import 宿主端），所以这里
+		 * 的值必须与 `src/index.js` 的 `MAX_TEXT_LENGTH` 一致；`test/contract.test.js`
+		 * 断言两处字面量相等。
+		 */
+		const MAX_TEXT_LENGTH = 200;
+
 		//#region 工具
 
 		/**
@@ -215,9 +233,37 @@ body[data-ds-dark-theme] .ul-heat i[data-l="4"],body[data-ds-dark-theme] .ul-leg
 .ul-sort:hover{background:var(--dsw-alias-bg-layer-2)}
 .ul-arrow{font-size:10px;opacity:.9}
 /* 键盘焦点必须看得见：用宿主 token 描边，两个主题都成立。 */
-.ul-sort:focus-visible,.ul-tab:focus-visible,.ul-iconbtn:focus-visible,.ul-badge:focus-visible,.ul-date:focus-visible{
+.ul-sort:focus-visible,.ul-tab:focus-visible,.ul-iconbtn:focus-visible,.ul-badge:focus-visible,.ul-date:focus-visible,
+.ul-ubtn:focus-visible,.ul-uinput:focus-visible,.ul-usel:focus-visible,.ul-usearch:focus-visible{
   outline:2px solid var(--dsw-alias-state-business-primary);outline-offset:1px}
 .ul-panel:focus-visible{outline:2px solid var(--dsw-alias-state-business-primary);outline-offset:2px}
+/* 未定价区块（ADR-0008）。全部颜色走宿主 token，与面板其它部分同一套规则；
+   动作按钮是真实 button，所以它们也进上面的 :focus-visible 清单。 */
+.ul-unpriced{border:1px solid var(--dsw-alias-border-l2,currentColor);border-radius:8px;padding:8px 10px;margin-top:10px}
+.ul-urow{display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding:5px 0;border-bottom:1px solid var(--dsw-alias-border-l1,currentColor)}
+.ul-urow:last-child{border-bottom:0}
+.ul-uid{flex:1 1 220px;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.ul-umeta{color:var(--dsw-alias-label-secondary,currentColor);font-size:11px;font-variant-numeric:tabular-nums;white-space:nowrap}
+.ul-ubtn{background:transparent;border:1px solid var(--dsw-alias-border-l2,currentColor);color:inherit;border-radius:6px;
+  padding:2px 9px;cursor:pointer;font-size:11px;white-space:nowrap}
+.ul-ubtn:hover:not([disabled]){background:var(--dsw-alias-bg-layer-2)}
+/* 禁用态必须看得出来：它是「点不了」的唯一信号，光标也要跟着变。 */
+.ul-ubtn[disabled]{cursor:not-allowed;color:var(--dsw-alias-label-secondary,currentColor);border-color:var(--dsw-alias-border-l1,currentColor)}
+.ul-usearch{display:flex;flex-direction:column;gap:6px;margin-top:6px}
+.ul-uinput{background:var(--dsw-alias-bg-layer-2);border:1px solid var(--dsw-alias-border-l2,currentColor);color:inherit;
+  border-radius:6px;padding:3px 7px;font-size:12px;min-width:0}
+.ul-ulist{max-height:190px;overflow:auto;border:1px solid var(--dsw-alias-border-l1,currentColor);border-radius:6px}
+.ul-usel{display:block;width:100%;text-align:left;background:transparent;border:0;border-bottom:1px solid var(--dsw-alias-border-l1,currentColor);
+  color:inherit;padding:4px 7px;cursor:pointer;font-size:11px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.ul-usel:hover{background:var(--dsw-alias-bg-layer-2)}
+.ul-usel[data-on="1"]{background:var(--dsw-alias-bg-layer-2);font-weight:600}
+.ul-uform{display:grid;grid-template-columns:auto 1fr;gap:5px 8px;align-items:center;margin-top:6px}
+.ul-uform label{color:var(--dsw-alias-label-secondary,currentColor);font-size:11px}
+.ul-uerr{color:var(--dsw-alias-label-primary,currentColor);font-size:11px}
+.ul-uactions{display:flex;gap:8px;align-items:center;margin-top:8px;flex-wrap:wrap}
+.ul-udone{color:var(--dsw-alias-label-secondary,currentColor);font-size:11px}
+.ul-uconf{border:1px solid var(--dsw-alias-border-l2,currentColor);border-radius:6px;padding:7px 9px;margin-top:6px;font-size:11px}
+.ul-uprices{font-variant-numeric:tabular-nums}
 `;
 
 		/** 样式只注入一次。 */
@@ -248,6 +294,550 @@ body[data-ds-dark-theme] .ul-heat i[data-l="4"],body[data-ds-dark-theme] .ul-leg
 			if (!response.ok) throw new Error(`HTTP ${response.status}`);
 			return await response.json();
 		}
+
+		/**
+		 * 拉取未定价清单（ADR-0008 §2）。
+		 *
+		 * 与主载荷**同口径**的查询串：面板上的「未定价」区块必须与当前标签页的数字
+		 * 自洽，否则用户会看到「本月 3 个未定价」配「累计的 7 行清单」。
+		 *
+		 * @param query - 与 {@link fetchUsage} 相同的查询串。
+		 * @param signal - 中止信号。
+		 * @returns 未定价载荷。
+		 */
+		async function fetchUnpriced(query, signal) {
+			const response = await fetch(`${API}/unpriced?${query}`, { signal, headers: { accept: "application/json" } });
+			if (!response.ok) throw new Error(`HTTP ${response.status}`);
+			return await response.json();
+		}
+
+		/**
+		 * 写 overrides（ADR-0008 §4）。
+		 *
+		 * 服务端的错误码是**稳定的英文码**，这里原样带出来（放进 `detail`），由
+		 * {@link describeOverrideError} 翻成中文——把「服务端说了什么」与「给用户看
+		 * 什么」分开，报障时才能对上日志。
+		 *
+		 * @param body - 请求体 `{op, …}`。
+		 * @returns `{ok: true, payload}` 或 `{ok: false, detail}`。
+		 */
+		async function postOverrides(body) {
+			const response = await fetch(`${API}/overrides`, {
+				method: "POST",
+				headers: { "content-type": "application/json", accept: "application/json" },
+				body: JSON.stringify(body),
+			});
+			let payload = null;
+			try {
+				payload = await response.json();
+			} catch {
+				// 响应不是 JSON（例如反向代理返回了 HTML 错误页）：下面按 HTTP 码报错。
+			}
+			if (response.ok && payload?.ok === true) return { ok: true, payload };
+			const detail = payload?.detail ?? payload?.error ?? `HTTP ${response.status}`;
+			return { ok: false, detail };
+		}
+
+		/**
+		 * 把服务端的错误码翻成中文。
+		 *
+		 * 原始码一律附在括号里：用户看到的是人话，报障时贴出来的仍是可检索的稳定码。
+		 * 不认识的码原样展示——比吞掉它、只留一句「写入失败」要好。
+		 *
+		 * @param detail - 服务端 `detail` 或 `error`。
+		 * @returns 中文文案（含原始码）。
+		 */
+		function describeOverrideError(detail) {
+			const table = {
+				"invalid-body": "请求体不是合法的 JSON 对象。",
+				"unknown-field": "请求体里有未定义的字段。",
+				"unknown-op": "不认识的操作。",
+				"invalid-id": "模型 id / 别名不合法（不能为空、不能含控制字符、不能用保留名）。",
+				"invalid-price": "价格必须是有限数且 ≥ 0。",
+				"invalid-currency": "币种不合法。",
+				"unknown-currency": "该币种没有汇率，无法折算：请先在主定价表的 rates 里加汇率。",
+				"invalid-note": "备注最长 200 个字符。",
+				"invalid-reason": "理由最长 200 个字符。",
+				"unknown-model": "目标模型不在合并后的定价表里（不能写出死别名）。",
+				"unknown-target": "remove 的目标只能是 model 或 alias。",
+				"body-too-large": "请求体过大。",
+				"unsupported-version": "overrides 文件版本比本插件新，已拒绝写入（避免覆盖）。",
+				"overrides-unreadable": "overrides 文件已存在但内容读不出来（不是合法 JSON）。为避免清空你手写的修正，已拒绝写入——请先修好这个文件。",
+				"unsupported-media-type": "请求的 content-type 不是 application/json。",
+				forbidden: "只允许本机访问。",
+				"write-disabled": "插件配置已关闭 overrides 写入。",
+				"method-not-allowed": "方法不允许。",
+				internal: "写入失败，文件未改动。",
+			};
+			const text = table[detail];
+			return text === undefined ? `写入失败：${detail}` : `${text}（${detail}）`;
+		}
+
+		//#endregion
+
+		//#region 未定价（ADR-0008）
+
+		/**
+		 * 候选搜索的过滤与排序（规格 §8.3）。
+		 *
+		 * 四级顺序：① `id` 折叠后与查询**完全相等**；② `id` 折叠后以查询**开头**；
+		 * ③ `id` 含查询；④ 仅 `modelName` 含查询。同级按 `id` 的 `localeCompare` 升序。
+		 * 空查询返回**空列表**（并让调用方提示「输入模型 id 或名称搜索」）——把 147 行
+		 * 全铺出来不是「搜索」，是让用户自己滚。
+		 *
+		 * @param candidates - `candidates` 数组。
+		 * @param query - 用户输入。
+		 * @returns 过滤排序后的数组。
+		 */
+		function filterCandidates(candidates, query) {
+			const needle = query.trim().toLowerCase();
+			if (needle === "") return [];
+			const rankOf = (candidate) => {
+				const id = String(candidate.id ?? "").toLowerCase();
+				if (id === needle) return 0;
+				if (id.startsWith(needle)) return 1;
+				if (id.includes(needle)) return 2;
+				const name = String(candidate.modelName ?? "").toLowerCase();
+				if (name.includes(needle)) return 3;
+				return -1;
+			};
+			return (candidates ?? [])
+				.map((candidate) => ({ candidate, rank: rankOf(candidate) }))
+				.filter((entry) => entry.rank >= 0)
+				.sort((a, b) => (a.rank === b.rank ? String(a.candidate.id).localeCompare(String(b.candidate.id)) : a.rank - b.rank))
+				.map((entry) => entry.candidate);
+		}
+
+		/** 价格展示：缺失（null）显示破折号，**不显示 0**——0 是「真的免费」。 */
+		function fmtPrice(value) {
+			return typeof value === "number" && Number.isFinite(value) ? String(value) : "—";
+		}
+
+		/**
+		 * 未定价区块：清单 + 认领 + 自定义价格（ADR-0008 §5）。
+		 *
+		 * 状态机恰好四个状态（`list` / `claim` / `confirm` / `custom`），外加两个正交
+		 * 标志（`pending` 有请求在飞、`feedback` 上一次结果）。四态是互斥的，所以用一个
+		 * 字符串而不是四个布尔——四个布尔能表示 16 种状态，其中 12 种是非法的。
+		 *
+		 * @param props - `{items, candidates, overrides, currency, onDone}`。
+		 *   `candidates` 里已经带了每个候选的 `currency` 与 `aliasTarget`，所以币种选项与
+		 *   「只做一跳」提示都不需要额外请求——候选清单在 `claim` 之前就到了。
+		 * @returns 区块节点，或 null（没有未定价模型时整块不渲染）。
+		 */
+		function UnpricedSection(props) {
+			const { items = [], candidates = [], overrides = {}, currency = "CNY", onDone } = props;
+			const [rawState, setState] = useState("list");
+			const [pending, setPending] = useState(false);
+			const [feedback, setFeedback] = useState(null);
+			const [ctx, setCtx] = useState({ itemId: null, query: "", selected: null, form: null, suggestion: null });
+			const searchRef = useRef(null);
+
+			// 刷新后该行可能已经被定价（或整块消失）：那时必须回到 list，否则用户会停在
+			// 一个指向**已经不存在的行**的确认框上，点「确认写入」写的是他不再看得见的东西。
+			//
+			// 这一步是**渲染期推导**而不是只靠副作用：副作用的 setState 要到下一帧才生效，
+			// 而「下一帧」意味着用户先看到一帧属于已消失行的确认框——哪怕只有一帧，那也是
+			// 一次可以点下去的假 UI。`feedback` 刻意保留：「已写入」这句话在刷新后仍要看得见。
+			const stale = ctx.itemId !== null && items.every((item) => item.id !== ctx.itemId);
+			const state = stale ? "list" : rawState;
+			useEffect(() => {
+				if (!stale) return;
+				setState("list");
+				setCtx({ itemId: null, query: "", selected: null, form: null, suggestion: null });
+			}, [stale]);
+
+			// 进 claim 态后焦点要落进搜索框：键盘用户点完「认领为已有模型」不该还要再 Tab 一圈。
+			useEffect(() => {
+				if (state === "claim") searchRef.current?.focus?.();
+			}, [state]);
+
+			// 没有未定价模型时**整块不渲染**——但**有一个例外**：刚认领完最后一条时
+			// `items` 会变成 `[]`，而「已写入 overrides：<路径>」正是那一刻最该被看见的
+			// 反馈。直接 `return null` 会让它在组件卸载的同时消失：用户点了确认、面板
+			// 什么都没说、清单也空了——看起来像操作没生效。所以有反馈时仍渲染一个窄块。
+			const writable = overrides.enabled !== false;
+			const path = overrides.path ?? "";
+			if (items.length === 0 && feedback === null) return null;
+
+			/** 回到清单并清空上下文；`feedback` 不动。 */
+			const backToList = () => {
+				setState("list");
+				setCtx({ itemId: null, query: "", selected: null, form: null, suggestion: null });
+			};
+
+			/**
+			 * 打开「认领为已有模型」。
+			 *
+			 * 带推荐（点了行内那个「认领为 X」快捷入口）时把搜索词**预填成推荐目标**：
+			 * 用户已经表达了「我就要这个」，再让他从零开始打字是多余的一步。预填之后仍然
+			 * 要走「搜索 → 选中 → 确认」这条链路——**不能**直接跳到确认，因为确认框里要展示
+			 * 的是一份从候选清单里现取的、可核对的价格，而推荐本身只有模型名与理由。
+			 *
+			 * @param item - 未定价清单里的那一行。
+			 * @param suggestion - 选中的推荐（可缺省）。
+			 */
+			const openClaim = (item, suggestion) => {
+				setState("claim");
+				setCtx({ itemId: item.id, query: suggestion?.model ?? "", selected: null, form: null, suggestion: suggestion ?? null });
+			};
+
+			/** 打开「自定义价格」：模型名只读、其余清空、币种取显示币种。 */
+			const openCustom = (item) => {
+				setState("custom");
+				setCtx({
+					itemId: item.id,
+					query: "",
+					selected: null,
+					suggestion: null,
+					form: { model: item.model, input: "", output: "", cacheRead: "", cacheWrite: "", currency, note: "" },
+				});
+			};
+
+			/** 提交类动作的统一包装：一次只允许一个 POST 在飞。 */
+			const submit = async (body, onOk) => {
+				setPending(true);
+				setFeedback(null);
+				try {
+					const result = await postOverrides(body);
+					if (result.ok) {
+						setFeedback({ kind: "done", text: `已写入 overrides：${result.payload?.path ?? path}` });
+						onDone?.();
+					} else {
+						setFeedback({ kind: "error", text: describeOverrideError(result.detail) });
+					}
+					return result.ok;
+				} catch (error) {
+					// 网络异常沿用既有「刷新失败：…」的口径，不另造一套文案。
+					setFeedback({ kind: "error", text: `写入失败：${error?.message ?? String(error)}` });
+					return false;
+				} finally {
+					setPending(false);
+				}
+			};
+
+			/** Escape：关掉当前子状态但**不冒泡**到面板的 Esc（否则面板一起关掉）。 */
+			const onKeyDown = (event) => {
+				if (event.key !== "Escape") return;
+				event.stopPropagation();
+				backToList();
+			};
+
+			const item = items.find((entry) => entry.id === ctx.itemId);
+			const suggestionsOf = (row) => (row?.suggestions ?? []).filter((entry) => entry.model !== row.model);
+
+			//#region list
+			if (state === "list") {
+				// 只含反馈的窄块：认领掉最后一条后 `items` 是空的，这时不该再画一个
+				// 「未定价 0 个模型」的空清单——那是噪音，而用户此刻只想知道「写进去了没有」。
+				if (items.length === 0) {
+					return h("div", { className: "ul-sec" }, h("div", { className: "ul-unpriced" }, h("div", { className: feedback.kind === "done" ? "ul-udone" : "ul-err", role: "status" }, feedback.text)));
+				}
+				return h(
+					"div",
+					{ className: "ul-sec" },
+					h(
+						"h4",
+						null,
+						"未定价",
+						h("span", { className: "hint" }, `${items.length} 个模型 · 按 token 量降序`),
+					),
+					h(
+						"div",
+						{ className: "ul-unpriced" },
+						writable ? null : h("div", { className: "ul-muted" }, "写入已在配置里关闭（overridesFile: false），只能查看。"),
+						feedback !== null ? h("div", { className: feedback.kind === "done" ? "ul-udone" : "ul-err", role: "status" }, feedback.text) : null,
+						items.map((row) =>
+							h(
+								"div",
+								{ className: "ul-urow", key: row.id },
+								h("span", { className: "ul-uid", title: row.id }, row.id),
+								h("span", { className: "ul-umeta" }, `${fmtTokens(row.tokens)} tokens`),
+								h("span", { className: "ul-umeta" }, `${fmtCount(row.requests)} 次`),
+								row.cause === "no-rate" ? h("span", { className: "ul-umeta" }, "缺汇率") : null,
+								suggestionsOf(row).map((suggestion) =>
+									writable
+										? h(
+												"button",
+												{
+													key: suggestion.model,
+													type: "button",
+													className: "ul-ubtn",
+													title: suggestion.reason,
+													onClick: () => openClaim(row, suggestion),
+												},
+												`认领为 ${suggestion.model}`,
+											)
+										: null,
+								),
+								writable
+									? h("button", { type: "button", className: "ul-ubtn", onClick: () => openClaim(row, null) }, "认领为已有模型")
+									: null,
+								writable ? h("button", { type: "button", className: "ul-ubtn", onClick: () => openCustom(row) }, "自定义价格") : null,
+							),
+						),
+					),
+				);
+			}
+			//#endregion
+
+			if (item === undefined) return null;
+
+			//#region claim
+			if (state === "claim") {
+				const found = filterCandidates(candidates, ctx.query);
+				const shown = found.slice(0, MAX_SEARCH_ROWS);
+				return h(
+					"div",
+					{ className: "ul-sec", onKeyDown },
+					h("h4", null, "认领为已有模型", h("span", { className: "hint" }, item.id)),
+					feedback !== null ? h("div", { className: feedback.kind === "done" ? "ul-udone" : "ul-err", role: "status" }, feedback.text) : null,
+					h(
+						"div",
+						{ className: "ul-usearch" },
+						h("input", {
+							ref: searchRef,
+							className: "ul-uinput",
+							type: "text",
+							value: ctx.query,
+							placeholder: "输入模型 id 或名称搜索",
+							onChange: (event) => setCtx((prev) => ({ ...prev, query: event.target.value })),
+						}),
+						ctx.query.trim() === ""
+							? h("div", { className: "ul-muted" }, "输入模型 id 或名称搜索")
+							: shown.length === 0
+								? h("div", { className: "ul-muted" }, "没有匹配的模型")
+								: h(
+										"div",
+										{ className: "ul-ulist" },
+										shown.map((candidate) =>
+											h(
+												"button",
+												{
+													key: candidate.id,
+													type: "button",
+													className: "ul-usel",
+													onClick: () => {
+														setState("confirm");
+														setCtx((prev) => ({ ...prev, selected: candidate.id }));
+													},
+												},
+												`${candidate.id}　${candidate.modelName ?? ""}　${candidate.vendor ?? ""}　` +
+													`入 ${fmtPrice(candidate.input)} / 出 ${fmtPrice(candidate.output)} / ` +
+													`读 ${fmtPrice(candidate.cacheRead)} / 写 ${fmtPrice(candidate.cacheWrite)}　${candidate.currency}`,
+											),
+										),
+									),
+						found.length > shown.length ? h("div", { className: "ul-muted" }, `还有 ${found.length - shown.length} 条，请细化关键词`) : null,
+						h(
+							"div",
+							{ className: "ul-uactions" },
+							h("button", { type: "button", className: "ul-ubtn", onClick: backToList }, "返回"),
+						),
+					),
+				);
+			}
+			//#endregion
+
+			//#region confirm
+			if (state === "confirm") {
+				const candidate = candidates.find((entry) => entry.id === ctx.selected);
+				if (candidate === undefined) {
+					// 候选凭空消失（载荷被换掉）：退回 claim，不显示一个空白的确认框。
+					return h(
+						"div",
+						{ className: "ul-sec", onKeyDown },
+						h("h4", null, "认领为已有模型"),
+						h("div", { className: "ul-muted" }, "选中的模型已不在候选清单里，请重新选择。"),
+						h("button", { type: "button", className: "ul-ubtn", onClick: () => setState("claim") }, "返回"),
+					);
+				}
+				// 一跳解析的可见性提示：目标同时是别名键、且它的目标不是它自己时，插件**不会**
+				// 跟随到那个目标——写进去的别名直接用 `candidate.id` 自己的价格行。
+				// 不说清楚的话，用户会以为「认领到 A」等于「跟随 A 的别名 B 的价」。
+				const hops = candidate.aliasTarget ?? null;
+				const reason = ctx.suggestion?.model === candidate.id ? ctx.suggestion.reason : `面板认领 ${item.id} → ${candidate.id}`;
+				return h(
+					"div",
+					{ className: "ul-sec", onKeyDown },
+					h("h4", null, "确认写入", h("span", { className: "hint" }, "写入前请核对价格")),
+					feedback !== null ? h("div", { className: feedback.kind === "done" ? "ul-udone" : "ul-err", role: "status" }, feedback.text) : null,
+					h(
+						"div",
+						{ className: "ul-uconf" },
+						h("div", null, `未定价：${item.id}`),
+						h("div", null, `认领为：${candidate.id}${candidate.modelName === null ? "" : `（${candidate.modelName}）`}${candidate.vendor === null ? "" : ` · ${candidate.vendor}`}`),
+						h(
+							"div",
+							{ className: "ul-uprices" },
+							`每百万 token：输入 ${fmtPrice(candidate.input)} / 输出 ${fmtPrice(candidate.output)} / ` +
+								`缓存读 ${fmtPrice(candidate.cacheRead)} / 缓存写 ${fmtPrice(candidate.cacheWrite)} ${candidate.currency}`,
+						),
+						h("div", { className: "ul-muted" }, `写入路径：${path}`),
+						hops === null ? null : h("div", { className: "ul-muted" }, `插件只做一跳解析：本别名将直接使用 ${candidate.id} 自己的价格行，不会跟随到 ${hops}`),
+						// 推荐的理由原样展示：用户是**看着这句话**决定要不要认领的，
+						// 只在行内按钮的 title 上给一次、进确认框就藏起来，等于让他盲确认。
+						ctx.suggestion === null || ctx.suggestion.model !== candidate.id
+							? null
+							: h("div", { className: "ul-muted" }, `推荐理由：${ctx.suggestion.reason}`),
+					),
+					h(
+						"div",
+						{ className: "ul-uactions" },
+						h(
+							"button",
+							{
+								type: "button",
+								className: "ul-ubtn",
+								disabled: pending,
+								onClick: () =>
+									submit({ op: "setAlias", alias: item.model, model: candidate.id, reason }, (ok) => {
+										if (ok) setCtx((prev) => ({ ...prev, suggestion: null }));
+									}),
+							},
+							"确认写入",
+						),
+						h("button", { type: "button", className: "ul-ubtn", disabled: pending, onClick: () => setState("claim") }, "取消"),
+					),
+				);
+			}
+			//#endregion
+
+			//#region custom
+			const form = ctx.form ?? { model: item.model, input: "", output: "", cacheRead: "", cacheWrite: "", currency, note: "" };
+			/**
+			 * 客户端校验：与规格 §8.5 逐字一致，且与服务端 V10 **同判据**。
+			 *
+			 * 三步，顺序不能换：
+			 *
+			 * 1. **先 `trim()` 判空**——空串或纯空白视为「没填」。必填项报错；可选项返回
+			 *    `null`（缺省，**不写这个键**）。
+			 * 2. **再用 `Number.parseFloat`**，不是 `Number()`。这条是承重的：
+			 *    `Number("  ") === 0`，而服务端 V10 的判据是 `Number.isFinite(p) && p >= 0`
+			 *    ——**0 是合法价格**。所以只输入两个空格就会通过前端校验、发出 `input: 0`，
+			 *    该行随即从「—」变成 ¥0.00 并**离开未定价清单**。那正是 ADR-0001 明令禁止的
+			 *    「拿 0 冒充免费」，而前端是这条防线上的唯一一关。
+			 * 3. **整串必须是合法十进制数字**。`parseFloat` 是**前缀解析**：
+			 *    `parseFloat("0x10") === 0`（不是 16）、`parseFloat("12abc") === 12`。只靠
+			 *    `Number.isFinite` 会把这两种垃圾输入静默当成合法值——`0x10` 尤其危险，
+			 *    它会被当成**免费**。所以补一条整串匹配的判据。
+			 *
+			 * 正则**不**用 `String(parsed) === trimmed` 那种写法：它会把 `"1.50"`（→"1.5"）
+			 * 与 `"1e3"`（→"1000"）这类**完全合法**的写法一起误杀。科学计数法与多余小数位
+			 * 都是用户会真的输入的。
+			 */
+			const DECIMAL = /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$/;
+			const priceError = (raw, required) => {
+				const trimmed = String(raw).trim();
+				if (trimmed === "") return required ? "价格必须是有限数且 ≥ 0" : null;
+				if (!DECIMAL.test(trimmed)) return "价格必须是有限数且 ≥ 0";
+				const value = Number.parseFloat(trimmed);
+				return Number.isFinite(value) && value >= 0 ? null : "价格必须是有限数且 ≥ 0";
+			};
+			const errors = {
+				input: priceError(form.input, true),
+				output: priceError(form.output, true),
+				cacheRead: priceError(form.cacheRead, false),
+				cacheWrite: priceError(form.cacheWrite, false),
+			};
+			if (form.note.length > MAX_TEXT_LENGTH) errors.note = `备注最长 ${MAX_TEXT_LENGTH} 个字符`;
+			const valid = Object.values(errors).every((value) => value === null);
+			const currencyOptions = [currency, ...candidates.map((candidate) => candidate.currency)]
+				.filter((key) => typeof key === "string" && key !== "")
+				.filter((key, index, all) => all.indexOf(key) === index)
+				.sort();
+			const field = (key, label, required) =>
+				[
+					h("label", { key: `${key}-l`, htmlFor: `ul-f-${key}` }, label),
+					h("input", {
+						key: `${key}-i`,
+						id: `ul-f-${key}`,
+						className: "ul-uinput",
+						type: "text",
+						inputMode: "decimal",
+						value: form[key],
+						onChange: (event) => setCtx((prev) => ({ ...prev, form: { ...prev.form, [key]: event.target.value } })),
+					}),
+					errors[key] === undefined || errors[key] === null
+						? h("span", { key: `${key}-e` })
+						: h("span", { key: `${key}-e`, className: "ul-uerr" }, errors[key]),
+					required ? null : h("span", { key: `${key}-s` }),
+				];
+			return h(
+				"div",
+				{ className: "ul-sec", onKeyDown },
+				h("h4", null, "自定义价格", h("span", { className: "hint" }, item.id)),
+				feedback !== null ? h("div", { className: feedback.kind === "done" ? "ul-udone" : "ul-err", role: "status" }, feedback.text) : null,
+				h(
+					"div",
+					{ className: "ul-uform" },
+					h("label", { htmlFor: "ul-f-model" }, "模型"),
+					// 只读文本：模型名**不可编辑**，否则「给另一个模型定价」会静默发生。
+					h("input", { id: "ul-f-model", className: "ul-uinput", type: "text", value: item.model, readOnly: true }),
+					field("input", "输入（每百万）", true),
+					field("output", "输出（每百万）", true),
+					field("cacheRead", "缓存读（每百万）", false),
+					field("cacheWrite", "缓存写（每百万）", false),
+					h("label", { key: "cur-l", htmlFor: "ul-f-currency" }, "币种"),
+					h(
+						"select",
+						{
+							key: "cur-i",
+							id: "ul-f-currency",
+							className: "ul-uinput",
+							value: form.currency,
+							onChange: (event) => setCtx((prev) => ({ ...prev, form: { ...prev.form, currency: event.target.value } })),
+						},
+						currencyOptions.map((option) => h("option", { key: option, value: option }, option)),
+					),
+					h("label", { key: "note-l", htmlFor: "ul-f-note" }, "备注"),
+					h("input", {
+						key: "note-i",
+						id: "ul-f-note",
+						className: "ul-uinput",
+						type: "text",
+						value: form.note,
+						onChange: (event) => setCtx((prev) => ({ ...prev, form: { ...prev.form, note: event.target.value } })),
+					}),
+					errors.note === undefined ? h("span", { key: "note-e" }) : h("span", { key: "note-e", className: "ul-uerr" }, errors.note),
+					h("span", { key: "note-s" }),
+				),
+				h("div", { className: "ul-muted" }, `写入路径：${path}（只写这个文件，绝不改主定价表）`),
+				h(
+					"div",
+					{ className: "ul-uactions" },
+					h(
+						"button",
+						{
+							type: "button",
+							className: "ul-ubtn",
+							disabled: pending || !valid,
+							onClick: () => {
+								// 值以**数字**发出（服务端 V10 拒字符串）；空的可选项**不发这个键**，
+								// 免得写进一个伪造的 0。
+								//
+								// 解析必须与上面的校验**同一套**（trim + parseFloat），不能改用
+								// `Number()`：那会让 `"  "` 变回 0——校验刚判它是「没填」，发出去的
+								// 却是 0。判据与取值用两条不同规则，是这类「校验通过但值错了」的
+								// 典型成因。
+								const price = (raw) => Number.parseFloat(String(raw).trim());
+								const body = { op: "setModel", model: item.model, input: price(form.input), output: price(form.output) };
+								if (form.cacheRead.trim() !== "") body.cacheRead = price(form.cacheRead);
+								if (form.cacheWrite.trim() !== "") body.cacheWrite = price(form.cacheWrite);
+								if (form.currency !== "") body.currency = form.currency;
+								if (form.note !== "") body.note = form.note;
+								submit(body);
+							},
+						},
+						"写入 overrides",
+					),
+					h("button", { type: "button", className: "ul-ubtn", disabled: pending, onClick: backToList }, "取消"),
+				),
+			);
+			//#endregion
+		}
+
+		//#endregion
 
 		/**
 		 * 按范围订阅用量数据。
@@ -282,15 +872,26 @@ body[data-ds-dark-theme] .ul-heat i[data-l="4"],body[data-ds-dark-theme] .ul-leg
 		 */
 		const usageCache = new Map();
 
+		/**
+		 * 把范围折成查询串。
+		 *
+		 * 抽出来是因为**两个**接口（主载荷与未定价）必须发同一个查询串：口径一旦分叉，
+		 * 面板上会出现「本月 3 个未定价」配「累计的清单」这种自洽地错的画面。
+		 *
+		 * @param range - `{kind, from, to}`。
+		 * @returns 查询串。
+		 */
+		function rangeQuery(range) {
+			const params = new URLSearchParams({ range: range.kind });
+			if (range.kind === "custom") {
+				if (range.from) params.set("from", range.from);
+				if (range.to) params.set("to", range.to);
+			}
+			return params.toString();
+		}
+
 		function useUsage(range) {
-			const query = (() => {
-				const params = new URLSearchParams({ range: range.kind });
-				if (range.kind === "custom") {
-					if (range.from) params.set("from", range.from);
-					if (range.to) params.set("to", range.to);
-				}
-				return params.toString();
-			})();
+			const query = rangeQuery(range);
 			const [state, setState] = useState(() => {
 				const hit = usageCache.get(query);
 				return {
@@ -781,10 +1382,19 @@ body[data-ds-dark-theme] .ul-heat i[data-l="4"],body[data-ds-dark-theme] .ul-leg
 		 * 所以这里算出未定价 token 占总量多少：占比高时，官方价折算就是个偏低的残缺值，
 		 * 面板必须说清楚，否则用户会把「估算 ¥8」当成实际账单。
 		 *
+		 * **只保留这两句话**（规格 §8.1）：`未定价：N 个模型，占 X% 的 token 量` 与
+		 * `share >= 20` 时的后缀。明细清单与「去 $DSH_HOME/usage-ledger-pricing.json 里
+		 * 填价格」那句指引**已由 {@link UnpricedSection} 承担**——它给出逐行 id、调用量、
+		 * 推荐与两个动作入口，是同一件事的完整版本。
+		 *
+		 * 两块都画会在同一帧里出现两遍同样的行与**两条互斥的指引**（一句让人去手改 JSON、
+		 * 一句提供面板内认领），用户不知道该听谁的。所以这里退回到「只报比例」的职责，
+		 * 把「怎么办」交给下面那个区块。
+		 *
 		 * @param props - `{cost, models, currency}`。
 		 * @returns 提示节点或 null。
 		 */
-		function UnpricedNotice({ cost, models, currency }) {
+		function UnpricedNotice({ cost, models }) {
 			const unpriced = cost?.unpriced ?? [];
 			if (unpriced.length === 0) return null;
 			const totalTokens = (models ?? []).reduce((sum, row) => sum + (row.tokens ?? 0), 0);
@@ -792,11 +1402,6 @@ body[data-ds-dark-theme] .ul-heat i[data-l="4"],body[data-ds-dark-theme] .ul-leg
 				.filter((row) => row.cost === null || row.cost === undefined)
 				.reduce((sum, row) => sum + (row.tokens ?? 0), 0);
 			const share = totalTokens === 0 ? 0 : Math.round((missingTokens / totalTokens) * 100);
-			// 按 token 占比排序：谁最值得先补价格，一目了然。
-			const ranked = [...(models ?? [])]
-				.filter((row) => row.cost === null || row.cost === undefined)
-				.sort((a, b) => (b.tokens ?? 0) - (a.tokens ?? 0))
-				.slice(0, 6);
 			return h(
 				"div",
 				{ className: "ul-warn" },
@@ -805,16 +1410,6 @@ body[data-ds-dark-theme] .ul-heat i[data-l="4"],body[data-ds-dark-theme] .ul-leg
 					null,
 					`未定价：${unpriced.length} 个模型，占 ${share}% 的 token 量`,
 					share >= 20 ? "　—— 官方价折算偏低，仅供参考" : "",
-				),
-				h(
-					"div",
-					{ style: { marginTop: "4px" } },
-					ranked.map((row) => h("div", { key: row.model, className: "ul-muted" }, `· ${row.provider}/${row.model}　${fmtTokens(row.tokens)}`)),
-				),
-				h(
-					"div",
-					{ className: "ul-muted", style: { marginTop: "4px" } },
-					"在 $DSH_HOME/usage-ledger-pricing.json 里按每百万 token 填价格即可（改完自动生效，无需重启）。",
 				),
 			);
 		}
@@ -945,6 +1540,56 @@ body[data-ds-dark-theme] .ul-heat i[data-l="4"],body[data-ds-dark-theme] .ul-leg
 		}
 
 		/**
+		 * 按范围订阅未定价清单。
+		 *
+		 * 与 {@link useUsage} **同一个查询串**、同一套「属于哪个 query」的不变量：范围一变，
+		 * 上一个范围的清单立即作废。清单行带着 `item.id`（含 provider），把它留给新范围
+		 * 会让用户对着「近 7 天」的标签去认领「本月」的行——而认领写进的是**全局**的
+		 * overrides 文件，写错了不会随范围切换而消失。
+		 *
+		 * `enabled` 由主载荷决定：`cost.unpriced` 为空时**根本不发请求**。这不是优化而是
+		 * 正确性——`/unpriced` 的 `items` 集合与主载荷的 `cost.unpriced` **逐字相同**
+		 * （见 `buildUnpricedPayload` 的不变式），所以主载荷说「没有未定价模型」时，
+		 * 那次请求的答案一定是空清单，区块反正不渲染。
+		 *
+		 * 失败**不**打断面板：未定价区块只是锦上添花，取不到时整块不渲染即可，绝不能
+		 * 因为它读不到就让主面板挂掉（与 `loadPricingFile` 的既有口径一致）。
+		 *
+		 * @param range - `{kind, from, to}`。
+		 * @param enabled - 主载荷里是否真的有未定价模型。
+		 * @returns `{unpriced, reloadUnpriced}`。
+		 */
+		function useUnpriced(range, enabled) {
+			const query = rangeQuery(range);
+			const [state, setState] = useState({ query, data: null });
+			const [nonce, setNonce] = useState(0);
+
+			useEffect(() => {
+				if (!enabled) {
+					setState((prev) => (prev.data === null ? prev : { query, data: null }));
+					return undefined;
+				}
+				const controller = new AbortController();
+				setState((prev) => (prev.query === query ? prev : { query, data: null }));
+				fetchUnpriced(query, controller.signal)
+					.then((payload) => {
+						setState((prev) => (prev.query === query ? { query, data: payload } : prev));
+					})
+					.catch((error) => {
+						if (error?.name === "AbortError") return;
+						// 静默降级，但**记一条**——完全不说的话，用户会以为「没有未定价模型」。
+						console.warn("usage-ledger: unpriced 读取失败", error?.message ?? error);
+					});
+				return () => controller.abort();
+			}, [query, nonce, enabled]);
+
+			return {
+				unpriced: state.query === query ? state.data : null,
+				reloadUnpriced: useCallback(() => setNonce((value) => value + 1), []),
+			};
+		}
+
+		/**
 		 * 面板主体。
 		 *
 		 * @param props - `{onClose}`。
@@ -964,6 +1609,8 @@ body[data-ds-dark-theme] .ul-heat i[data-l="4"],body[data-ds-dark-theme] .ul-leg
 				providers: { key: "tokens", direction: "desc" },
 			});
 			const { data, error, loading, refreshing, refreshError, reload } = useUsage({ kind, from, to });
+			// 未定价清单只在主载荷**确实**说有未定价模型时才取（见 useUnpriced 的注释）。
+			const { unpriced, reloadUnpriced } = useUnpriced({ kind, from, to }, data !== null && (data.cost?.unpriced ?? []).length > 0);
 			// 打开面板时焦点必须进得来，否则键盘用户根本到不了里面。
 			const panelRef = useRef(null);
 
@@ -972,8 +1619,15 @@ body[data-ds-dark-theme] .ul-heat i[data-l="4"],body[data-ds-dark-theme] .ul-leg
 				saveRange({ kind, from, to });
 			}, [kind, from, to]);
 
-			// 面板开着的时候让数字自己跟上，不用手动点刷新。
-			useAutoRefresh(`${kind}:${from}:${to}`, useCallback(() => reload(), [reload]));
+			// 面板开着的时候让数字自己跟上，不用手动点刷新。未定价清单同频刷新：
+			// 它按范围摊平，跟着主载荷一起走才不会出现「表格说 0 个、区块列 3 个」。
+			useAutoRefresh(
+				`${kind}:${from}:${to}`,
+				useCallback(() => {
+					reload();
+					reloadUnpriced();
+				}, [reload, reloadUnpriced]),
+			);
 
 			useEffect(() => {
 				panelRef.current?.focus();
@@ -1140,6 +1794,21 @@ body[data-ds-dark-theme] .ul-heat i[data-l="4"],body[data-ds-dark-theme] .ul-leg
 									data.cost?.priced !== true || (data.cost?.unpriced ?? []).length > 0
 										? h(UnpricedNotice, { cost: data.cost, models: modelDetailRows, currency: data.cost?.currency })
 										: null,
+									unpriced === null
+										? null
+										: h(UnpricedSection, {
+												items: unpriced.items ?? [],
+												candidates: unpriced.candidates ?? [],
+												overrides: unpriced.overrides ?? {},
+												currency: unpriced.currency ?? data.cost?.currency,
+												onDone: () => {
+													// 认领成功后必须**立刻**重取两份数据：主载荷（金额与「未定价」
+													// 计数）与未定价清单（那一行该消失了）。宿主端在写入成功后把
+													// 节流戳归零，所以紧跟的这次 GET 一定读得到新内容。
+													reload();
+													reloadUnpriced();
+												},
+											}),
 									h(
 										"div",
 										{ className: "ul-foot" },
@@ -1291,6 +1960,7 @@ body[data-ds-dark-theme] .ul-heat i[data-l="4"],body[data-ds-dark-theme] .ul-leg
 		exports.Badge = Badge;
 		exports.Panel = Panel;
 		exports.Heatmap = Heatmap;
+		exports.UnpricedSection = UnpricedSection;
 		exports.fmtTokens = fmtTokens;
 
 		// 必须显式返回 module.exports。

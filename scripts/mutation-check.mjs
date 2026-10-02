@@ -246,6 +246,173 @@ const MUTANTS = [
 		from: '\t\t\t\tkey === "cacheHitRate"\n',
 		to: '\t\t\t\tkey !== "cacheHitRate"\n',
 	},
+	{
+		// ADR-0008 的推荐规则。这五条守的都是**静默错价**：并错一行不会报错，
+		// 只会让「官方价折算」这个数字悄悄偏高或偏低。
+		id: "unpriced-tail-number-stripped",
+		file: "src/index.js",
+		what: "在 suggestModels 里加一条「剥尾部数字」规则：`claude-opus-5-5`(4/20) 会被并到 `claude-opus-5`(5/25)，输入输出**都贵 25%**，而面板不会提示任何异常",
+		killer: "test/suggest.test.js「推荐边界：claude-opus-5-5 绝不推荐给 claude-opus-5（价差 25% 的反例）」与「推荐边界：qwen3.8-max 家族三行互不推荐（日期后缀反例）」",
+		from: "\tconst foldedTail = fold(tail(modelId));\n",
+		to: "\tconst foldedTail = fold(tail(modelId));\n\t{\n\t\tconst stripped = foldedSelf.replace(/-\\d+$/, \"\");\n\t\tif (stripped !== foldedSelf && foldedModels.has(stripped)) push(pickKey(foldedModels.get(stripped), stripped), 0.9, `去掉尾部数字后与 ${stripped} 同名`);\n\t}\n",
+	},
+	{
+		id: "alias-target-not-own-property",
+		file: "src/index.js",
+		what: "officialIdOf 的存在性判据改回 `in`（走原型链）：模型 id 恰好叫 `constructor`/`toString` 时会被判成「有价格行」，costOf 拿到一个函数返回 0 → 面板显示 ¥0.00 而 unpriced 为空（与 ADR-0001「不拿 0 冒充免费」冲突）",
+		killer: "test/unpriced.test.js「未定价载荷：model = \"constructor\" 不得被算成免费（原型链陷阱）」",
+		from: "\t\treturn Object.hasOwn(pricing, canonical) ? canonical : undefined;\n",
+		to: "\t\treturn canonical in pricing ? canonical : undefined;\n",
+	},
+	{
+		id: "overrides-early-return",
+		file: "src/index.js",
+		what: "refreshPricing 的早退条件改回只看 pricingFile：`{pricingFile: false, overridesFile: <tmp>}` 时连 overrides 都不读，用户在主表被关掉时写的全部手工修正静默失效",
+		killer: "test/routes.test.js「装配：{pricingFile:false} 但配了 overridesFile 时仍然读 overrides（早退条件的回归点）」",
+		from: "\t\tif (pricingFile === undefined && overridesFile === undefined) return;\n",
+		to: "\t\tif (pricingFile === undefined) return;\n",
+	},
+	{
+		id: "suggest-self-referential",
+		file: "src/index.js",
+		what: "去掉 suggestModels 的自指过滤：`cline-free/muse-spark-1.3-contributor` 既是模型行又有同名别名指向自己，面板会给出一条「认领成自己」的无操作建议",
+		killer: "test/suggest.test.js「推荐边界：自指建议必须过滤（认领成自己什么也修不了）」",
+		from: "\t\tif (target === modelId) return; // 自指：认领成自己什么也修不了\n",
+		to: "",
+	},
+	{
+		id: "alias-fold-first-match",
+		file: "src/index.js",
+		what: "折叠撞键时取「遍历到的第一个」而不是「逐字符相等优先」：结果依赖对象键的插入顺序，同一份数据换个顺序就给出不同的别名名，而那个名字要原样展示给用户",
+		killer: "test/suggest.test.js「推荐：折叠撞键时取逐字符相等的键，而不是「遍历到的第一个」」",
+		from: "\tconst exact = candidates.find((key) => key === wanted);\n\tif (exact !== undefined) return exact;\n",
+		to: "",
+	},
+	{
+		id: "override-atomic-write-direct",
+		file: "src/index.js",
+		what: "写入改成直接覆盖目标文件（不写临时文件、不 rename）：写入中途崩溃会留下半截 JSON，面板按空表降级，于是「刚认领的模型又变回未定价」",
+		killer: "test/routes.test.js「写入：覆盖既有文件走的是「临时文件 + rename」，不是就地截断」（判据是目标文件的 inode 变了）与「写入：落盘失败（目标是个目录）→ 500 internal，且不破坏原文件」",
+		from: "\t\tawait writeFile(temp, text, \"utf8\");\n\t\tawait rename(temp, file);\n",
+		to: "\t\tawait writeFile(file, text, \"utf8\");\n",
+	},
+	{
+		id: "override-alias-target-any-string",
+		file: "src/index.js",
+		what: "setAlias 不再要求目标是合并后 models 的自有键（只要求非空字符串）：面板点一下就写出一个**死别名**，那个 id 永远算不出钱且不会有任何报错",
+		killer: "test/overrides-post.test.js「校验 V15：别名目标必须是合并后 models 的自有键，但**可以**同时是别名键」与 test/routes.test.js 的 unknown-model 用例",
+		from: "\t\tif (!Object.hasOwn(models, body.model)) return { ok: false, detail: \"unknown-model\" };\n",
+		to: "",
+	},
+	{
+		id: "override-string-price-coerced",
+		file: "src/index.js",
+		what: "价格校验改成 `Number.isFinite(Number(value))`（做字符串强转）：`\"1.5\"` 与 `\"1.5abc\"` 都能过，写进文件的是字符串而不是数字，而面板显示的价格与算出来的钱之间没有任何保证",
+		killer: "test/overrides-post.test.js「校验 V10/V11：价格必须是有穷且 ≥ 0 的**数字**，不做字符串强转」",
+		from: '\tconst priceProblem = (value) => typeof value !== "number" || !Number.isFinite(value) || value < 0;\n',
+		to: "\tconst priceProblem = (value) => !Number.isFinite(Number(value)) || Number(value) < 0;\n",
+	},
+	{
+		id: "overrides-client-table-key-shadowed",
+		file: "src/index.js",
+		what: "合并时用 `target[key] = value` 而不是 defineProperty：键恰好是 `__proto__` 时会被原型 setter 吞掉（条目静默消失、原型被替换）",
+		killer: "test/overrides-file.test.js「mergePricing：`__proto__` 键不会污染原型，也不会静默消失」",
+		from: "\tObject.defineProperty(target, key, { value, enumerable: true, writable: true, configurable: true });\n",
+		to: "\ttarget[key] = value;\n",
+	},
+	{
+		// 装配层的变异：区块自己与接口各有一整套断言，但「Panel 到底有没有把两边接起来」
+		// 只有 test/client.test.js 那条集成用例能看见。接不上的话，未定价区块**永远不渲染**，
+		// 而所有单元断言照样全绿。
+		id: "panel-unpriced-not-wired",
+		file: "src/client.js",
+		what: "Panel 不再渲染 UnpricedSection：接口与区块都在、都测过，但面板上那一块永远不出现",
+		killer: "test/client.test.js「Panel 把 /unpriced 接进「未定价」区块，且只在该有未定价模型时才请求它」",
+		from: "\t\t\t\t\t\t\t\t\tunpriced === null\n\t\t\t\t\t\t\t\t\t\t? null\n",
+		to: "\t\t\t\t\t\t\t\t\ttrue\n\t\t\t\t\t\t\t\t\t\t? null\n",
+	},
+	{
+		// 第二轮评审的 F1：`Number("  ") === 0` 而服务端 V10 判 `0` 合法，所以前端是
+		// 「拿 0 冒充免费」的唯一防线。退回 `Number()` 会让两个空格通过校验、发出
+		// `input: 0`，该行随即从「—」变成 ¥0.00 并**离开未定价清单**（ADR-0001 禁止）。
+		id: "client-price-number-coerced",
+		file: "src/client.js",
+		what: "priceError 退回 `Number(raw)` 前缀/宽松转换：纯空白变 0（服务端认为 0 合法），`0x10` 变 0——整行被静默算成免费并离开未定价清单",
+		killer: "test/client-unpriced.test.js「必填栏是纯空白时禁用提交、显示中文错误、且**不发任何请求**」",
+		from: "\t\t\t\tif (!DECIMAL.test(trimmed)) return \"价格必须是有限数且 ≥ 0\";\n\t\t\t\tconst value = Number.parseFloat(trimmed);\n",
+		to: "\t\t\t\tconst value = Number(trimmed);\n",
+	},
+	{
+		// 第二轮评审的 F4：拿空表覆盖损坏文件 = 静默清空用户手写的整份 overrides，
+		// 返回 200、无备份。判据必须是**文件字节**，只断言状态码挡不住「返回 4xx 但
+		// 仍然写坏了文件」。
+		id: "overrides-corrupt-overwritten",
+		file: "src/index.js",
+		what: "写入前不再探测文件是否可解析：损坏的 overrides 被当成空表，`applyOverride` + `rename` 把它整份清空（返回 200、无备份）",
+		killer: "test/routes.test.js「写入：overrides 文件存在但损坏 → 拒绝写，文件字节逐字不变（绝不静默清空）」",
+		from: "\t\t\tif ((await probeOverridesFile(overridesFile)) === \"unreadable\") {\n\t\t\t\treturn sendJson(res, 409, { ok: false, error: \"bad-request\", detail: \"overrides-unreadable\" });\n\t\t\t}\n",
+		to: "",
+	},
+	{
+		// 第二轮评审的 F8：去掉 content-type 闸门 = 本机任意网页都能改用户的定价表
+		// （peer 同样是 127.0.0.1，回环闸门挡不住；而 JSON content-type 会让跨站请求
+		// 先撞 CORS 预检，本插件不返回 CORS 头 → 预检必败）。
+		id: "overrides-media-type-gate-removed",
+		file: "src/index.js",
+		what: "去掉 content-type 闸门：`text/plain` 这类 CORS 简单类型不再被拒，本机浏览器里的任意网页可以直接改 overrides",
+		killer: "test/routes.test.js「写入：content-type 不是 application/json → 400 且不落盘（跨站请求的第一道闸门）」",
+		from: "\t\t\tif (!mediaType.startsWith(\"application/json\")) return bad(\"unsupported-media-type\");\n",
+		to: "",
+	},
+	{
+		// 第二轮评审的 F3：`items` 空时直接 return null 会让「已写入」随组件卸载消失。
+		// 认领掉最后一个未定价模型是最常见路径，那一刻正是反馈最该被看见的时候。
+		id: "client-feedback-dropped-when-empty",
+		file: "src/client.js",
+		what: "items 为空时不再为反馈保留渲染：认领掉最后一个未定价模型后，「已写入 overrides」与写入路径随组件一起消失，用户以为操作没生效",
+		killer: "test/client-unpriced.test.js「认领掉最后一个模型后，反馈与写入路径仍然可见」",
+		from: "\t\t\tif (items.length === 0 && feedback === null) return null;\n",
+		to: "\t\t\tif (items.length === 0) return null;\n",
+	},
+	{
+		// 第二轮评审的 F2：`UnpricedNotice` 保留 ranked 明细段与「去 pricing.json 手改」
+		// 那句指引 → 同一帧里两块、同一行出现两遍、两条互斥的指引。
+		//
+		// 锚点刻意选**不含反引号**的那一行：`src/client.js` 的整段 CSS 活在模板字符串里，
+		// 替换文本一旦含反引号就会提前终止它（脚本自己会拦下来，见 assertAnchorSafe）。
+		id: "notice-ranked-kept",
+		file: "src/client.js",
+		what: "UnpricedNotice 重新渲染「在 $DSH_HOME/usage-ledger-pricing.json 里…」那句指引：与未定价区块重复，且给出两条互斥的修法",
+		killer: "test/client.test.js「未定价提示只报比例：明细清单与「去 pricing.json 手改」的指引不再重复出现」",
+		from: "\t\t\t\t\tshare >= 20 ? \"　—— 官方价折算偏低，仅供参考\" : \"\",\n\t\t\t\t),\n\t\t\t);\n\t\t}\n",
+		to: "\t\t\t\t\tshare >= 20 ? \"　—— 官方价折算偏低，仅供参考\" : \"\",\n\t\t\t\t),\n\t\t\t\th(\"div\", { className: \"ul-muted\" }, \"在 $DSH_HOME/usage-ledger-pricing.json 里按每百万 token 填价格即可（改完自动生效，无需重启）。\"),\n\t\t\t);\n\t\t}\n",
+	},
+	{
+		// 第二轮评审的 F4（第二次修订）：`probeOverridesFile` 对**非 ENOENT 的读取失败**
+		// 返回 `"ok"`，等于放行一次会覆盖掉「读不到的内容」的写入。
+		//
+		// 实测（Windows，`icacls <file> /deny <user>:(R)`）：`readFile` 抛 EPERM 而
+		// `rename` **成功**——`rename` 只替换目录项，**不需要读目标文件**。所以「写入会
+		// 自然失败」这个假设不成立，后果与「损坏文件被当空表」完全相同：用户手写的整份
+		// overrides 被静默清空、返回 200、无备份。
+		id: "overrides-read-failure-allowed",
+		file: "src/index.js",
+		what: "非 ENOENT 的读取失败（EPERM/EACCES 等）被判成 ok：文件在、可能有内容、我们读不到，但写入会成功并覆盖掉那些内容——静默丢数据",
+		killer: "test/routes.test.js「写入：文件存在、可写、但**读取失败**（EPERM/EACCES）→ 拒绝写，字节逐字未变」与「判据分支：错误码 → 三态」",
+		from: '\tif (code === "EISDIR" || code === "ENOTDIR") return "ok";\n',
+		to: '\treturn "ok";\n\tif (code === "EISDIR" || code === "ENOTDIR") return "ok";\n',
+	},
+	{
+		// 这条与上一条是**方向相反**的配对：把 EISDIR 也判成 unreadable 会让
+		// 「落盘失败（目标是个目录）→ 500 internal」那条既有用例变红。两条一起，
+		// 才把「三态区分」这件事完整钉住（只测一个方向会漏掉把两者混为一谈的实现）。
+		id: "overrides-eisdir-treated-unreadable",
+		file: "src/index.js",
+		what: "把「目标不是普通文件」（EISDIR/ENOTDIR）也判成 unreadable：原子写失败的 500「写入失败，文件未改动」被误报成「文件内容坏了」，把排查方向指错",
+		killer: "test/routes.test.js「写入：落盘失败（目标是个目录）→ 500 internal，且不破坏原文件」与「判据分支：错误码 → 三态」",
+		from: '\tif (code === "EISDIR" || code === "ENOTDIR") return "ok";\n',
+		to: '\tif (code === "EISDIR" || code === "ENOTDIR") return "unreadable";\n',
+	},
 ];
 
 /**
@@ -277,6 +444,26 @@ function countOf(haystack, needle) {
 }
 
 /**
+ * 把锚点/替换文本的行尾折成目标文件实际用的那一种。
+ *
+ * 变异体的锚点写在源码里，用的是 `\n`；而 Windows 上 `core.autocrlf=true` 的检出
+ * 整个工作区都是 `\r\n`，于是每一个多行锚点都会「出现 0 次」，脚本在第一个变异体上
+ * 就报「锚点写错了」——**报的是源码漂移，实际是检出方式**。这是最难排查的一类假警报：
+ * 它看起来像代码改了，而 CI（Linux，LF）完全正常。
+ *
+ * 所以这里先探测文件用的是哪种行尾，再把锚点与替换文本统一折成那一种。
+ * 单行锚点不含 `\n`，折换是空操作，因此两种检出下行为完全一致。
+ *
+ * @param text - 锚点或替换文本。
+ * @param eol - 目标文件的行尾（`"\r\n"` 或 `"\n"`）。
+ * @returns 折成目标行尾的文本。
+ */
+function withEol(text, eol) {
+	if (eol === "\n") return text;
+	return text.replace(/\r?\n/g, eol);
+}
+
+/**
  * 锚点防御：锚点必须在**代码**里唯一出现，且替换不得破坏模板字符串。
  *
  * 三道检查，任一不过就抛错（脚本随即失败，不产出任何结果）：
@@ -292,14 +479,22 @@ function countOf(haystack, needle) {
  *
  * @param mutant - 变异体。
  * @param source - 原始源码文本。
+ * @returns `{from, to}`——已折成源码实际行尾的锚点与替换文本。
  * @throws {Error} 锚点缺失/不唯一，或替换文本不安全时。
  */
 function assertAnchorSafe(mutant, source) {
-	const { id, file, from, to } = mutant;
+	const { id, file } = mutant;
+	// 行尾以源码里实际出现的那一种为准：含 `\r\n` 就是 CRLF 检出。
+	const eol = source.includes("\r\n") ? "\r\n" : "\n";
+	const from = withEol(mutant.from, eol);
+	const to = withEol(mutant.to, eol);
 
 	const rawHits = countOf(source, from);
 	if (rawHits !== 1) {
-		throw new Error(`[${id}] 锚点在 ${file} 原始文本里出现 ${rawHits} 次（必须恰好 1 次）：${JSON.stringify(from.slice(0, 80))}`);
+		throw new Error(
+			`[${id}] 锚点在 ${file} 原始文本里出现 ${rawHits} 次（必须恰好 1 次）：${JSON.stringify(from.slice(0, 80))}` +
+				`（该文件行尾是 ${eol === "\r\n" ? "CRLF" : "LF"}，锚点已按此折算）`,
+		);
 	}
 	const codeHits = countOf(stripComments(source), from);
 	if (codeHits !== 1) {
@@ -320,6 +515,7 @@ function assertAnchorSafe(mutant, source) {
 			throw new Error(`[${id}] 替换文本含 \${：会破坏 ${file} 的 CSS 模板字符串。`);
 		}
 	}
+	return { from, to };
 }
 
 /**
@@ -553,8 +749,10 @@ async function main() {
 		for (const mutant of MUTANTS) {
 			const filePath = join(ROOT, mutant.file);
 			const original = await readFile(filePath, "utf8");
-			assertAnchorSafe(mutant, original);
-			const mutated = original.replace(mutant.from, mutant.to);
+			// 锚点按源码实际行尾折算后再替换：CRLF 检出下多行锚点原样是 `\n`，
+			// 会出现 0 次并报成「源码漂移」（见 assertAnchorSafe 的注释）。
+			const { from, to } = assertAnchorSafe(mutant, original);
+			const mutated = original.replace(from, to);
 			assertTemplateSafe(mutant, original, mutated);
 			if (mutated === original) throw new Error(`[${mutant.id}] 替换后源码没有变化：锚点写错了。`);
 

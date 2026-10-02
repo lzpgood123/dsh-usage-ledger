@@ -77,16 +77,34 @@ $DSH_HOME/sessions/<cwd 编码>/session-<uuid>/session.v4.jsonl.zstd
   config:
     sessionsRoot: /custom/path/to/sessions   # 默认 $DSH_HOME/sessions
     pricingFile: /custom/pricing.json        # 默认 $DSH_HOME/usage-ledger-pricing.json；设 false 关闭
+    overridesFile: /custom/overrides.json    # 默认 $DSH_HOME/usage-ledger-overrides.json；设 false 关闭写入
     currency: CNY                            # 计价币种，默认 CNY
 ```
+
+`overridesFile: false` 只关闭**写入**（`POST /overrides` 一律 403 `write-disabled`），面板上的未定价区块会变成只读清单，主表与合并逻辑不受影响。
 
 ## HTTP 接口
 
 ```
 GET /api/usage-ledger?range=today|week|month|all|custom&from=YYYY-MM-DD&to=YYYY-MM-DD
+GET /api/usage-ledger/unpriced?range=…&from=…&to=…     # 只读：未定价清单 + 候选模型 + 带理由的推荐
+POST /api/usage-ledger/overrides                       # 写入：setModel / setAlias / remove
 ```
 
-**只允许回环地址读取**（`127.0.0.1` / `::1`），其余来源一律 403。接口暴露的是本机全部会话的用量画像（含模型与项目规模），不该被局域网里的其他机器读到；判据是不可伪造的 peer 地址，`Host` 只作补充。
+**只允许回环地址读取**（`127.0.0.1` / `::1`），其余来源一律 403。接口暴露的是本机全部会话的用量画像（含模型与项目规模），不该被局域网里的其他机器读到；判据是不可伪造的 peer 地址，`Host` 只作补充。三条路由各自做方法闸门（前两条只认 `GET`/`HEAD`，第三条只认 `POST`，其余 405），回环闸门对三条**同样生效**——写接口放行局域网等于让别的机器改你的定价表。
+
+`POST /overrides` 的请求体是**严格 schema**，出现任何未列出的键一律 400 `unknown-field`。这同时是防目录穿越的实现方式：请求体里根本没有路径字段可传，写入位置固定为 `$DSH_HOME/usage-ledger-overrides.json`。错误响应里的 `detail` 是稳定的英文码（`invalid-price` / `unknown-model` / `unknown-currency` / `unsupported-version` …），面板负责翻成中文。
+
+写接口还要求 **`content-type: application/json`**（否则 400 `unsupported-media-type`）。这不是格式洁癖，是本接口唯一挡得住「本机浏览器里的任意网页」的判据：宿主 webserver 直接调用路由 handler，**没有鉴权层**；而回环闸门只查 peer 地址——来自本机网页的请求 peer 同样是 `127.0.0.1`，照常放行。`application/json` 属于 CORS 的**非简单** content-type，跨站请求会先发 `OPTIONS` 预检，而本插件不返回任何 CORS 头 → 预检必败 → 真正的 POST 发不出去。（`text/plain` 是简单类型、不会被预检拦住，所以必须明确拒绝。）
+
+若 overrides 文件**已存在、但读不出内容**，写入会被拒绝（409 `overrides-unreadable`）而不是拿空表覆盖它——那个文件里是用户手写的修正，静默清空等于丢数据。两种情况都算：
+
+- **内容不是合法 JSON**（例如手改时多留一个尾逗号）；
+- **文件读不出来**（`EPERM` / `EACCES` 等，例如权限只给了写没给读）。
+
+第二种容易被误判成「反正写会失败」，但它**不会**：原子写用的是 `rename`，而 `rename` 只替换目录项、**不需要读目标文件**（实测：`icacls <file> /deny <user>:(R)` 下 `readFile` 抛 `EPERM`，`rename` 照常成功）。所以「读不到」绝不能当成「没有内容」。唯一的例外是目标根本不是普通文件（目录等）——那时写入本身必然失败，走既有的 500 `internal`「写入失败，文件未改动」。
+
+读取侧仍然按空表降级（价格读不到不该让面板挂掉），只有**写**会拒绝。
 
 ## 定价（可选）
 
@@ -122,6 +140,34 @@ cp usage-ledger-pricing.json "$DSH_HOME/usage-ledger-pricing.json"
 
 金额仅供参考，与你实际的渠道结算无关。
 
+### 面板内认领（overrides）
+
+主表是仓库同步来的目录，**手改它下次同步就被覆盖**。所以面板里的「未定价」区块把手工修正写进**独立的** `$DSH_HOME/usage-ledger-overrides.json`，合并顺序是：
+
+```
+内联 config  <  usage-ledger-pricing.json  <  usage-ledger-overrides.json
+```
+
+overrides 是用户最新的意图，优先级最高；主表整份替换不丢手工修正。写入走**临时文件 + rename** 的原子替换（避免半截 JSON），成功后立刻生效（不是「30 秒内」——面板紧跟的那次请求会强制重读）。**绝不修改主定价表**。
+
+```json
+{
+  "version": 1,
+  "models": {
+    "some-new-model-x": { "input": 1.5, "output": 6, "currency": "CNY", "note": "面板手工录入", "source": "manual" }
+  },
+  "aliases": {
+    "workbuddy/deepseek-v4.2-sg": { "model": "deepseek-flash", "reason": "同型号新加坡区", "addedAt": "2026-10-02T21:40:00+08:00", "origin": "panel" }
+  }
+}
+```
+
+`aliases` 的值允许是**字符串**（旧格式，主表现有的 20 条都是）或**对象**（新格式）；解析时统一成对象，字符串视为 `{model: <str>}`，所以主表不用改。overrides **没有** `rates` 段（币种可用性由主表的 `rates` 决定），出现即忽略并记一条 warn。
+
+**推荐规则只有三条**，每条都能用一句话解释，且都带 `reason`：去掉命名空间前缀后的尾部匹配（`0.9`）、大小写折叠（`1`）、已知别名的反向映射（`0.8`）。**明确不做**去日期后缀、去尾部数字、编辑距离——实测 `claude-opus-5-5`(4/20) 与 `claude-opus-5`(5/25) 输入输出**都贵 25%**，`qwen3.8-max-0902` 与 `qwen3.8-max` 在表里是**两行**；任何「按后缀合并」的实现都会静默用错价。推荐只是**待确认的建议**，确认框里必须展示实际价格，从不自动应用。
+
+**别名解析是一跳**：写完 `A → T` 后插件只看 `T` 自己的价格行。所以服务端硬校验只有一条——`T` 必须是**合并后 models 的自有键**（否则就是「死别名」，永远算不出钱）。「`T` 同时是别名键」只提示不拒绝：实测运行时表 27 条别名里有 23 条的目标同时是别名键，按「不能是另一个别名」实现会让 `deepseek-flash` 这类最常用的目标全部不可写。见 `docs/adr/0008-in-panel-model-claiming.md`。
+
 ## 设计取舍
 
 **不碰宿主 `settings`。** 数据源本身就是权威的：每条记录都带着实际服务该请求的 provider/model。早先的版本依赖宿主 `settings.get(ns)` 来判断路由，结果是中转站发现不了——这个依赖被整个去掉了。
@@ -129,6 +175,8 @@ cp usage-ledger-pricing.json "$DSH_HOME/usage-ledger-pricing.json"
 **不依赖任何第三方前端组件。** 浏览器端是手写的 `__ModuleLoader__` bundle，用运行时 `createElement`，没有构建步骤、没有 JSX，也不 require 宿主的 UI primitives。此前有插件因为图标名在宿主版本间从 `IconCloseOutline16` 改成 `IconCloseOutlineRegular` 而拿到 `undefined`，React 抛错导致整个插槽静默崩溃。这里只用 React 原生元素 + 宿主 CSS 变量 + 文字符号。
 
 **不读凭据、不发网络请求。** 面板里的通道数量就是这些——没有别的。
+
+**写入只落在 `$DSH_HOME` 下的一份独立文件里。** 面板内认领（`POST /overrides`）是这个插件唯一的写路径：路径固定、不接受任意路径（请求体里根本没有路径字段），走临时文件 + rename 的原子替换，且**绝不修改主定价表**。主表是仓库同步来的目录，改它下次同步就被覆盖。`overridesFile: false` 可以整个关掉写入。
 
 **外观只依赖宿主 token。** 面板的颜色取自宿主的 `--dsw-alias-*` 变量（唯一的例外
 是热力图五档色阶——宿主没有强度色阶 token，它由插件自带常量、按
@@ -148,7 +196,7 @@ cp usage-ledger-pricing.json "$DSH_HOME/usage-ledger-pricing.json"
 ## 结构
 
 ```
-src/index.js                宿主端：挂 HTTP 路由与 /usage 命令，按范围聚合、计价
+src/index.js                宿主端：挂 HTTP 路由与 /usage 命令，按范围聚合、计价、overrides 读写
 src/scan.js                 会话日志扫描与聚合（多帧 zstd 解压、usage 提取）
 src/client.js               浏览器端面板（手写 ModuleLoader bundle，无构建步骤）
 scripts/mutation-check.mjs  变异检查：把源码改坏，验证测试真的会红（见下）
@@ -157,8 +205,14 @@ test/list-sessions.test.js  会话文件枚举与跨代去重
 test/payload.test.js        载荷组装：范围折算、371 天窗口、渠道计价
 test/cost-of.test.js        计价口径：缺价格或缺汇率一律留空，不拿 0 冒充免费
 test/pricing-file.test.js   价格表读取与路径解析：读不到价格表只降级，绝不拖垮面板
+test/overrides-file.test.js overrides 读取、别名规范化与三层合并：旧格式别名继续可用
+test/overrides-post.test.js 写入校验清单（V5–V17）与 applyOverride 的落盘语义
+test/unpriced.test.js       未定价探测载荷：schema、cause 的两支、跨接口不变式
+test/suggest.test.js        推荐规则：只有三条可解释的规则，含价差反例断言
+test/routes.test.js         路由注册、方法/回环闸门、写入的原子性与串行化
 test/screen-request.test.js 回环闸门：只放行精确回环地址，局域网一律 403
 test/client.test.js         浏览器端导出的纯函数与组件
+test/client-unpriced.test.js 未定价区块的状态机：搜索、确认、自定义价格、Esc
 test/appearance.test.js     外观契约：宿主 token 存在性、色阶可辨、键盘可达
 test/contract.test.js       跨端契约：两端字面量必须一致（见下）
 test/viewport.test.js       视口几何：真实 Chrome 驱动，面板不得被切出视口
@@ -233,6 +287,45 @@ CI 因此把浏览器用例拆进独立的 job（见下）。
   这些退化都固化在 `scripts/mutation-check.mjs` 里（`pricing-file-*` 三个变异体），
   手工自证因此变成常驻护栏。`file === ""` 那半句是**例外**：`readFile("")` 本身就是
   ENOENT，与正常吞掉 ENOENT 的结果完全一样，进程外无法区分，所以没有对应变异体。
+- **overrides 与三层合并**（`overrides-file.test.js`）：`resolveOverridesFile` 的
+  `$DSH_HOME` 口径与 `false` = 关闭写入；`loadOverridesFile` 的容错逐条对齐
+  `loadPricingFile`（拿不到路径/ENOENT → 空形状且**不 warn**，损坏 → 一次 warn），
+  `models`/`aliases` 各自独立降级；版本策略（缺失当 1 不 warn、`>1` 尽力合并但 warn、
+  非整数当 1 并 warn）；`normalizeAliasMap` 把**字符串**（旧格式）与**对象**（新格式）
+  统一成对象并丢弃坏项与原型保留名。`mergePricing` 守「内联 < 主表 < overrides」，
+  `sources` 记最终赢的那一层，冲突日志**只记 overrides 覆盖别人**（内联被主表覆盖是
+  既有行为，为它刷日志会淹没真正的冲突）。向后兼容的判据落在**仓库底表的 20 条字符串
+  别名**上：规范化后一条都不能少、值都变成对象、`model` 一字不改。
+- **写入校验与落盘**（`overrides-post.test.js`）：`validateOverride` 是纯函数，V5–V17
+  每条各一个用例（合法通过 + 恰好一个非法字段 → 对应的稳定错误码）。三条容易写错且错了
+  不报错的规则被单独钉住：价格**不做字符串强转**（`"1.5"` 拒）、别名目标必须是合并后
+  models 的**自有键**但**可以**同时是别名键、缺省的 `cacheRead`/`cacheWrite`/`currency`
+  **不写这个键**（写 0 是伪造免费）。`applyOverride` 三个 op 的落盘语义与幂等另有用例。
+- **未定价探测载荷**（`unpriced.test.js`）：七个顶层键、`cause` 的两支（`no-price` /
+  `no-rate`）必须穷尽 `costOf` 的两条 `undefined` 路径、候选的可空性写死为 `null`
+  而不是 0。**最重要的一条是跨接口不变式**：同一批记录下，`/unpriced` 的 `items` 与
+  主载荷的 `cost.unpriced` 必须逐字相同——两处分叉时面板会同时显示「未定价：N 个模型」
+  与一份对不上的清单，而没有任何报错。`model = "constructor"` 的用例守的是原型链陷阱
+  （`in` 会拿到 Object 构造函数，把整行静默算成 ¥0）。
+- **推荐规则**（`suggest.test.js`）：只有三条规则，每条都带非空 `reason`，且返回值
+  必须是合并后 models 的自有键。**禁止清单配实测反例**：`claude-opus-5-5` 绝不推荐给
+  `claude-opus-5`（输入输出都贵 25%）、`qwen3.8-max` 家族三行互不推荐（日期后缀）。
+  运行时表才有的行（`qwen3.8-max-*`、`Doubao-Seed-2.1-Pro`）用**内联 fixture** 写死，
+  不读 `$DSH_HOME`——那是本机数据，CI 上没有，读它等于让断言静默变成跳过。另覆盖折叠
+  撞键的确定性消歧、自指建议过滤、纯函数性。
+- **路由与写入**（`routes.test.js`）：用假 ctx + 假 server 把 `apply()` 真跑起来，
+  断言三条 exact 路由的注册形状、方法闸门（新路由必须有自己的 405）、回环闸门覆盖
+  写接口，以及 `{pricingFile:false, overridesFile}` 下 overrides **仍然被读**（早退
+  条件只看 `pricingFile` 会让手工修正静默失效）。写入侧守路径固定（未知键一律
+  `unknown-field`）、原子替换（判据是目标文件 **inode 变了**——「目录里没留 .tmp」
+  杀不掉就地写）、并发 8 个 op 全部落盘（promise 链串行化）、落盘失败 500 且原文件
+  不变、`version > 1` 拒绝且文件一字不动。
+- **未定价区块的状态机**（`client-unpriced.test.js`）：`UnpricedSection` 从
+  `src/client.js` 导出，用可重放的状态桩驱动四态（list / claim / confirm / custom）。
+  搜索的四级顺序用一份四级全命中的 fixture 断言；确认框必须展示价格、写入路径与
+  「只做一跳」提示；POST 的 URL / 方法 / body 逐字段断言（每次点击都像「已经写好了」，
+  真正落盘的只有这一个请求）；失败留在确认态且不调 `onDone`；Escape 必须
+  `stopPropagation`（否则一次 Esc 同时关掉区块与面板）。
 - **回环闸门**（`screen-request.test.js`）：就是「HTTP 接口」那节的回环闸门——
   `screenRequest` 是面板唯一的安全边界。判据是三个字面量的**精确匹配**
   （`127.0.0.1` / `::1` / `::ffff:127.0.0.1`），不是网段匹配也不是前缀匹配，所以
@@ -255,7 +348,8 @@ CI 因此把浏览器用例拆进独立的 job（见下）。
   混进未定价提示的 token 占比——期望值从载荷现算，改 fixture 时断言跟着对。
 - **跨端契约**（`contract.test.js`）：把 `src/client.js` 当文本读出字面量，与宿主端
   导出的 `BASE_PATH` / `ACTIVITY_DAYS` / `RANGE_KINDS` 比较，并断言 `API` 常量确实
-  被 `fetch` 使用（存在不等于被使用）。理由见
+  被 `fetch` 使用（存在不等于被使用），以及两条新接口路径仍是 `` `${API}…` `` 的模板串
+  形态、两端的 `MAX_TEXT_LENGTH` 同值。理由见
   `docs/adr/0005-cross-end-contract-by-test.md`——浏览器端 bundle 不是 ES module，
   它的 `require` 也不认相对路径，两端无法共享代码，只能靠断言钉住一致。
 - **外观**（`appearance.test.js`）：把宿主主题包当权威来源读进来，断言

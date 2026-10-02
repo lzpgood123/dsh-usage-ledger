@@ -496,7 +496,7 @@ test("Heatmap 的 activityDays 缺省或非法时回落到 371 天", async (t) =
 
 //#region 模块契约
 
-test("factory 显式返回 module.exports，并暴露 apply / inject / Badge / Panel", async () => {
+test("factory 显式返回 module.exports，并暴露 apply / inject / Badge / Panel / UnpricedSection", async () => {
 	const { exports, registration } = await loadClient();
 
 	assert.equal(registration.id, "dsh-usage-ledger");
@@ -504,6 +504,7 @@ test("factory 显式返回 module.exports，并暴露 apply / inject / Badge / P
 	assert.equal(typeof exports.apply, "function");
 	assert.equal(typeof exports.Badge, "function");
 	assert.equal(typeof exports.Panel, "function");
+	assert.equal(typeof exports.UnpricedSection, "function", "未定价区块必须导出，否则它的状态机只能用真实浏览器测");
 	assert.equal(Object.prototype.toString.call(exports), "[object Module]", "带上 Symbol.toStringTag");
 });
 
@@ -1345,6 +1346,165 @@ test("A8：刷新持续失败不得永久显示「更新中…」，但已有数
 	assert.equal(warn.length, 1, "刷新失败必须有一条可见文案，否则用户以为数字是最新的");
 	assert.match(textOf(warn[0]), /刷新失败/, `刷新失败文案里必须说清是「刷新」失败：${textOf(warn[0])}`);
 	assert.match(textOf(warn[0]), /仍在显示|上一次/, "刷新失败文案必须告诉用户画面上的数字是旧的");
+});
+
+test("未定价提示只报比例：明细清单与「去 pricing.json 手改」的指引不再重复出现", async (t) => {
+	// 规格 §8.1 第 456 行：`UnpricedNotice` 只保留已被钉住的两句（占比 + share>=20 后缀），
+	// `ranked` 明细段与「在 $DSH_HOME/usage-ledger-pricing.json 里…」那句指引**由
+	// `UnpricedSection` 承担**。
+	//
+	// 两块都画会在同一帧里出现两遍同样的行与**两条互斥的指引**——一句让人去手改 JSON、
+	// 一句提供面板内认领，用户不知道该听谁的。这条用例把「不再重复」钉住。
+	const payload = payloadWithRows();
+	payload.models[0].cost = null;
+	payload.cost = { priced: true, total: 1, currency: "CNY", unpriced: ["m-one"] };
+	const unpricedPayload = {
+		ok: true,
+		currency: "CNY",
+		range: { from: null, to: null, label: "本月" },
+		items: [
+			{
+				id: "relay-a/m-one",
+				provider: "relay-a",
+				model: "m-one",
+				tokens: 200,
+				requests: 2,
+				inputTokens: 1,
+				outputTokens: 1,
+				cacheReadTokens: 0,
+				cacheWriteTokens: 0,
+				reasoningTokens: 0,
+				cacheHitRate: 10,
+				cause: "no-price",
+				suggestions: [],
+			},
+		],
+		candidates: [],
+		overrides: { path: "/home/u/.dsh/usage-ledger-overrides.json", exists: false, version: null, enabled: true },
+	};
+
+	const harness = statefulReact();
+	const { exports } = await load(t, {
+		react: harness.stub,
+		fetch: async (url) => ({
+			ok: true,
+			status: 200,
+			json: async () => (String(url).includes("/unpriced") ? unpricedPayload : payload),
+		}),
+	});
+	const render = () => {
+		harness.begin();
+		return exports.Panel({ onClose: () => {} });
+	};
+	// 三帧：主载荷 → enabled 翻真后发 /unpriced → 区块拿到 items。
+	render();
+	await flush();
+	render();
+	await flush();
+	const node = render();
+	const text = textOf(node);
+
+	assert.match(text, /未定价：1 个模型，占 \d+% 的 token 量/, "已被钉住的占比那句必须保留（test/client.test.js 的 #9 占比用例依赖它）");
+	assert.doesNotMatch(
+		text,
+		/在 \$DSH_HOME\/usage-ledger-pricing\.json 里按每百万 token 填价格即可/,
+		"「去 pricing.json 手改」那句指引仍在：它与面板内认领是两条互斥的路径，同时出现会让用户不知道该听谁的（规格 §8.1）",
+	);
+
+	// 「同一行只出现一次」：`relay-a/m-one` 在整棵树里只能有一处——既有的提示区不再
+	// 列明细，明细只由未定价区块提供。先确认区块确实渲染了，否则「只出现一次」也可能
+	// 只是因为它压根没渲染。
+	assert.equal(findAllByClass(node, "ul-unpriced").length, 1, "前置条件：未定价区块必须渲染出来");
+	const occurrences = findAll(node, (element) => textOf(element) === "relay-a/m-one");
+	assert.equal(
+		occurrences.length,
+		1,
+		`\`relay-a/m-one\` 在树里作为独立文本出现了 ${occurrences.length} 处（应为 1）：` +
+			"提示区与未定价区块同时列了同一行，用户会以为是两条不同的记录。",
+	);
+});
+
+test("Panel 把 /unpriced 接进「未定价」区块，且只在该有未定价模型时才请求它", async (t) => {
+	// 这条守的是**装配**：区块自己（client-unpriced.test.js）与接口（unpriced.test.js）
+	// 都各有一整套断言，但「Panel 到底有没有把两边接起来」只有这里能看见。
+	// 接不上的话，`UnpricedSection` 永远拿不到 `items`，面板上那一块**永远不渲染**，
+	// 而所有单元断言照样全绿。
+	const requests = [];
+	const unpricedPayload = {
+		ok: true,
+		currency: "CNY",
+		range: { from: null, to: null, label: "本月" },
+		items: [
+			{
+				id: "relay-a/brand-new",
+				provider: "relay-a",
+				model: "brand-new",
+				tokens: 5000,
+				requests: 7,
+				inputTokens: 5000,
+				outputTokens: 0,
+				cacheReadTokens: 0,
+				cacheWriteTokens: 0,
+				reasoningTokens: 0,
+				cacheHitRate: 0,
+				cause: "no-price",
+				suggestions: [{ model: "deepseek-flash", score: 0.9, reason: "去掉命名空间前缀后与 deepseek-flash 同名" }],
+			},
+		],
+		candidates: [{ id: "deepseek-flash", input: 2, output: 8, cacheRead: 0.04, cacheWrite: 0, currency: "CNY", vendor: "DeepSeek", modelName: "DeepSeek Flash", context: 1000, source: "file", aliasTarget: null }],
+		overrides: { path: "/home/u/.dsh/usage-ledger-overrides.json", exists: false, version: null, enabled: true },
+	};
+	const fetchStub = async (url) => {
+		const text = String(url);
+		requests.push(text);
+		return { ok: true, status: 200, json: async () => (text.includes("/unpriced") ? unpricedPayload : payloadWith({ priced: true, total: 1, currency: "CNY", unpriced: ["relay-a/brand-new"] })) };
+	};
+
+	const harness = statefulReact();
+	const { exports } = await load(t, { fetch: fetchStub, react: harness.stub });
+	const render = () => {
+		harness.begin();
+		return exports.Panel({ onClose: () => {} });
+	};
+
+	// 三帧，而不是两帧：第一帧还没有主载荷（`enabled` 为 false，不发 /unpriced 请求）；
+	// 主载荷回来后 `enabled` 翻真，effect 才发那次请求；请求回来后还要再渲染一帧。
+	// 真实 React 里这三帧由 setState 自动驱动，这里的桩要手动走一遍。
+	render();
+	await flush();
+	render();
+	await flush();
+	const node = render();
+
+	assert.ok(
+		requests.some((url) => url.includes("/unpriced")),
+		"Panel 从未请求 /unpriced：未定价区块永远拿不到 items，那一块在面板上**永远不渲染**，而所有单元断言照样全绿",
+	);
+	const text = textOf(node);
+	assert.match(text, /relay-a\/brand-new/, "未定价清单里的行必须真的渲染出来");
+	assert.equal(findAll(node, (element) => element.type === "button" && textOf(element) === "自定义价格").length, 1, "每行都要有动作入口");
+
+	// 反向对照：主载荷说「没有未定价模型」时**不该**发这个请求。
+	const clean = statefulReact();
+	const cleanRequests = [];
+	const cleanLoad = await load(t, {
+		fetch: async (url) => {
+			cleanRequests.push(String(url));
+			return { ok: true, status: 200, json: async () => payloadWith({ priced: true, total: 1, currency: "CNY", unpriced: [] }) };
+		},
+		react: clean.stub,
+	});
+	clean.begin();
+	cleanLoad.exports.Panel({ onClose: () => {} });
+	await flush();
+	clean.begin();
+	const cleanNode = cleanLoad.exports.Panel({ onClose: () => {} });
+	assert.equal(
+		cleanRequests.some((url) => url.includes("/unpriced")),
+		false,
+		"主载荷说「没有未定价模型」时不该再发一次请求——接口的不变式保证那次答案一定是空清单，区块反正不渲染",
+	);
+	assert.equal(findAllByClass(cleanNode, "ul-unpriced").length, 0, "没有未定价模型时不该渲染区块");
 });
 
 test("A8：无数据时的失败是致命错误，必须显示错误页而不是永远「加载中」", async (t) => {
