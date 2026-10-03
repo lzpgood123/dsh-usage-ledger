@@ -64,6 +64,31 @@ const RUNTIME_LIKE_ALIASES = {
 };
 
 /**
+ * 只含 `deepseek-flash` 一行的最小模型表。
+ *
+ * ## 为什么这几条 R3 用例**不再**用仓库底表
+ *
+ * 2026-10-03 定价表扩容（76 → 147 模型、20 → 27 别名）后，仓库底表里**也有了**
+ * `deepseek-v4.1-flash` / `DeepSeek-V4.1-Flash` / `deepseek-v4.1-flash-sg` /
+ * `DeepSeek-V4-Flash` 这几个别名键。于是原先那几条用例的输入从「查无此 id」
+ * 变成了「命中真别名」——它们**依赖底表恰好没有这些键**这个偶然事实，一旦底表
+ * 变富就集体变红（实测 4 条）。
+ *
+ * 这与「测试不得读 `$DSH_HOME`」是同一类教训：**fixture 要显式写出来，不能靠
+ * 环境的偶然内容**。所以下面这几条改用本表构造，底表只用于「真数据兼容性」那一类
+ * 断言（见文件末尾的向后兼容用例）。
+ */
+const MINIMAL_MODELS = {
+	"deepseek-flash": { input: 2, output: 8, currency: "CNY" },
+};
+
+/** 与 {@link MINIMAL_MODELS} 配套的别名 fixture，覆盖 R3 与折叠撞键两种形态。 */
+const MINIMAL_ALIASES = {
+	"deepseek-v4.1-flash": "deepseek-flash",
+	"DeepSeek-V4.1-Flash": "deepseek-flash",
+};
+
+/**
  * 断言一组建议满足全部结构性不变量（规格 A34）。
  *
  * @param suggestions - {@link suggestModels} 的结果。
@@ -128,27 +153,36 @@ test("推荐：R1 去掉命名空间前缀后同名", () => {
 
 test("推荐：R3 走已知别名的反向映射（ADR 自己的例子，但走的是 R3 不是 R1）", () => {
 	// ADR-0008 §3 的例子是 `deepseek/DeepSeek-V4.1-Flash → deepseek-v4.1-flash`。
-	// 但 `deepseek-v4.1-flash` 在两张表里**都是别名键、都不是模型行**（实测
-	// `Object.hasOwn(models,"deepseek-v4.1-flash") === false`），所以照 ADR 字面写 R1
-	// 会得到**空建议**。正确答案是走 R3、目标是 `deepseek-flash`。
+	// 但 `deepseek-v4.1-flash` 是**别名键、不是模型行**（实测两张表都如此），所以照
+	// ADR 字面写 R1 会得到**空建议**。正确答案是走 R3、目标是 `deepseek-flash`。
+	//
+	// 用 MINIMAL_* 而不是仓库底表：底表在 2026-10-03 扩容后**也**含这些键，用它就
+	// 测不出「R3 而非 R1」这件事了（两者会同时命中，分不出是哪条规则给的答案）。
 	assert.equal(
-		Object.hasOwn(REPO_MODELS, "deepseek-v4.1-flash"),
+		Object.hasOwn(MINIMAL_MODELS, "deepseek-v4.1-flash"),
 		false,
-		"前置事实：`deepseek-v4.1-flash` 在仓库表里不是模型行。这条断言红了说明底表变了，下面的期望值要跟着复核。",
+		"前置事实：`deepseek-v4.1-flash` 不是模型行——否则 R1 也会命中，本条就分不出 R3",
 	);
 
-	const suggestions = suggestModels("deepseek/DeepSeek-V4.1-Flash", { models: REPO_MODELS, aliases: REPO_ALIASES });
+	const suggestions = suggestModels("deepseek/DeepSeek-V4.1-Flash", { models: MINIMAL_MODELS, aliases: MINIMAL_ALIASES });
 
 	assert.deepEqual(suggestions.map((entry) => entry.model), ["deepseek-flash"], "R3 应给出别名 `deepseek-v4.1-flash` 的目标");
 	assert.equal(suggestions[0].score, 0.8, "R3 的分数是 0.8（已知别名是最弱的证据）");
-	assert.equal(suggestions[0].reason, "已有别名 deepseek-v4.1-flash → deepseek-flash");
-	assertShape(suggestions, REPO_MODELS, "R3");
+	// 输入尾部逐字符等于**大写版**别名键，所以 reason 里必须原样写它——这正是
+	// 「折叠撞键取逐字符相等的那个」这条规则在起作用（两条别名指向同一目标，折叠后
+	// 无从区分，只有逐字符比较能定下来）。面板要把这个名字原样展示给用户。
+	assert.equal(suggestions[0].reason, "已有别名 DeepSeek-V4.1-Flash → deepseek-flash");
+	assertShape(suggestions, MINIMAL_MODELS, "R3");
 });
 
 test("推荐：只凭「前缀像」不许猜——查无此 id 时返回空数组", () => {
-	// `deepseek-v4.1-flash-sg` 在仓库表里既不是模型行也不是别名键。它与
+	// `deepseek-v4.1-flash-sg` 在这份 fixture 里既不是模型行也不是别名键。它与
 	// `deepseek-v4.1-flash` 共享前缀，但那不是证据：猜错就是把另一个模型的价格套上来。
-	const suggestions = suggestModels("deepseek-v4.1-flash-sg", { models: REPO_MODELS, aliases: REPO_ALIASES });
+	//
+	// 注意：仓库底表在 2026-10-03 扩容后**确实**含 `deepseek-v4.1-flash-sg` 这个别名
+	// （它是新加坡区变体，已确认与主区同价）。所以这条必须用不含它的 fixture 来测
+	// 「查无此 id」这个**规则边界**——用底表测的会是另一件事（命中真别名）。
+	const suggestions = suggestModels("deepseek-v4.1-flash-sg", { models: MINIMAL_MODELS, aliases: MINIMAL_ALIASES });
 
 	assert.deepEqual(suggestions, [], "前缀相同不是同一模型：不得凭「像」猜一个");
 });
@@ -191,11 +225,21 @@ test("推荐：折叠撞键时取逐字符相等的键，而不是「遍历到�
 });
 
 test("推荐：R2 与 R1 同分指向同一目标时只出现一次", () => {
-	const suggestions = suggestModels("DeepSeek-V4-Flash", { models: REPO_MODELS, aliases: REPO_ALIASES });
+	// 用显式 fixture：`DeepSeek-V4-Flash` 与模型行 `deepseek-v4-flash` 仅大小写不同（R2），
+	// 同时它作为别名键的折叠形态也会命中（R1）——两条规则指向同一目标时必须合并成一条。
+	//
+	// 不用仓库底表：2026-10-03 扩容后底表里 `DeepSeek-V4-Flash` 是**指向 deepseek-flash
+	// 的别名**（R3），那时 R2/R1 都命中不了 `deepseek-v4-flash`，本条就测不到合并逻辑了。
+	const models = {
+		"deepseek-v4-flash": { input: 2, output: 8, currency: "CNY" },
+	};
+	const aliases = { "DeepSeek-V4-Flash": "deepseek-v4-flash" };
+
+	const suggestions = suggestModels("DeepSeek-V4-Flash", { models, aliases });
 
 	assert.deepEqual(suggestions.map((entry) => entry.model), ["deepseek-v4-flash"], "R2 与 R1 指向同一目标，合并成一条");
 	assert.equal(suggestions[0].score, 1, "保留分高的 R2");
-	assertShape(suggestions, REPO_MODELS, "R2+R1 合并");
+	assertShape(suggestions, models, "R2+R1 合并");
 });
 
 test("推荐边界：claude-opus-5-5 绝不推荐给 claude-opus-5（价差 25% 的反例）", () => {
@@ -272,21 +316,30 @@ test("推荐：纯函数——同一入参调两次深等，且不修改入参",
 	assert.equal(JSON.stringify({ models, aliases }), before, "suggestModels 不得修改入参");
 });
 
-test("推荐：仓库底表的 20 条字符串别名全部能被反向使用（向后兼容）", () => {
-	// 仓库表的别名值**全是字符串**（实测 20/20）。规范化的正确形式是「值统一成对象」，
+test("推荐：仓库底表的 27 条字符串别名全部能被反向使用（向后兼容）", () => {
+	// 仓库表的别名值**全是字符串**（实测 27/27）。规范化的正确形式是「值统一成对象」，
 	// 但 `suggestModels` 必须同时吃得下字符串与对象两种形态——否则主表的别名在推荐里
 	// 全部失效，而面板会安静地少掉一批最该出现的建议。
+	//
+	// 这个数字**故意写死**：底表变了就必须有人来复核覆盖面。
+	// 2026-10-03 由 20 改为 27——定价表扩容（76 → 147 模型）时新增了 7 条渠道专有别名。
 	const keys = Object.keys(REPO_ALIASES);
-	assert.equal(keys.length, 20, `仓库底表的别名条数变了（${keys.length}），这条兼容性断言的覆盖面要跟着复核`);
+	assert.equal(keys.length, 27, `仓库底表的别名条数变了（${keys.length}），这条兼容性断言的覆盖面要跟着复核`);
 	for (const key of keys) {
 		assert.equal(typeof REPO_ALIASES[key], "string", `仓库表别名 \`${key}\` 的值不是字符串`);
 	}
 
 	// 反向用法：把别名键当成「新出现的 id」来问，目标应被推出来。
 	for (const [aliasKey, target] of [
-		["deepseek-v4-flash-0731", "deepseek-v4-flash"],
+		// 2026-10-03：`deepseek-v4-flash` 已作为「旧名，已下线」删除（官方说明该 id 的
+		// 请求由 V4.1-Flash 接管、按 Flash 价计费），`-0731` 这个快照别名随之重指向
+		// `deepseek-flash`。期望值同步跟进。
+		["deepseek-v4-flash-0731", "deepseek-flash"],
 		["sn-deepseek-v4-1-flash", "deepseek-flash"],
 		["gemini-3.7-flash-high", "gemini-3.7-flash"],
+		// 2026-10-03 扩容新增的别名也要能被反向使用。
+		["deepseek-v4.1-flash-sg", "deepseek-flash"],
+		["Doubao-Seed-2.1-Pro", "doubao-seed-2.1-pro"],
 	]) {
 		const suggestions = suggestModels(`relay-y/${aliasKey}`, { models: REPO_MODELS, aliases: REPO_ALIASES });
 		assert.ok(

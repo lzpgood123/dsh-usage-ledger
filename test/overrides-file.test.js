@@ -337,19 +337,23 @@ test("normalizeAliasMap：非对象入参一律返回空表，不抛错", () => 
 	}
 });
 
-test("向后兼容：仓库底表 20 条字符串别名经规范化后逐条可用，且值都变成对象", async () => {
+test("向后兼容：仓库底表 27 条字符串别名经规范化后逐条可用，且值都变成对象", async () => {
 	const table = JSON.parse(await readFile(new URL("../usage-ledger-pricing.json", import.meta.url), "utf8"));
 	const raw = table.aliases ?? {};
 	const keys = Object.keys(raw);
 
-	assert.equal(keys.length, 20, `仓库底表的别名条数变了（${keys.length}），这条兼容性断言的覆盖面要跟着复核`);
+	// 这个数字**故意写死**：底表变了就必须有人来复核这条兼容性断言的覆盖面。
+	// 2026-10-03 由 20 改为 27——定价表扩容（76 → 147 模型）时新增了 7 条渠道专有别名
+	// （DeepSeek-V4.1-Flash、Doubao-Seed-2.1-Pro、deepseek-v4.1-flash-sg、deepseek-chat 等），
+	// 它们同样是**字符串**值，所以「旧格式继续可用」的覆盖面随之扩大，断言数量同步跟进。
+	assert.equal(keys.length, 27, `仓库底表的别名条数变了（${keys.length}），这条兼容性断言的覆盖面要跟着复核`);
 	assert.ok(
 		keys.every((key) => typeof raw[key] === "string"),
 		"仓库底表的别名值必须全是字符串——它正是「旧格式要继续能用」的样本",
 	);
 
 	const normalized = normalizeAliasMap(raw);
-	assert.equal(Object.keys(normalized).length, keys.length, "20 条一条都不能少：规范化不得丢任何合法项");
+	assert.equal(Object.keys(normalized).length, keys.length, "27 条一条都不能少：规范化不得丢任何合法项");
 	for (const key of keys) {
 		assert.equal(typeof normalized[key].model, "string", `别名 \`${key}\` 必须解析出字符串 model`);
 		assert.notEqual(normalized[key].model, "", `别名 \`${key}\` 的 model 不得为空`);
@@ -357,14 +361,12 @@ test("向后兼容：仓库底表 20 条字符串别名经规范化后逐条可�
 	}
 });
 
-test("向后兼容：任意条数的字符串别名都继续可用（含 27 条这一档）", () => {
-	// 验收里写的是「主表 **27 条**字符串格式别名继续可用」——那个 27 是**运行时表**的
-	// 条数（本机数据，CI 上没有）。规格与 captain 都明确要求测试**不得**读 `$DSH_HOME`：
-	// 读它等于让断言在 CI 上静默变成「跳过」，而「没跑」与「通过了」是两回事。
+test("向后兼容：任意条数的字符串别名都继续可用（含 147 条这一档）", () => {
+	// 验收里写的是「主表 **27 条**字符串格式别名继续可用」。2026-10-03 起仓库底表本身就是
+	// 27 条（此前是 20 条，扩容时新增了 7 条），上面那条用例已用真数据覆盖它。
 	//
-	// 所以这里按**条数**构造等价语料：字符串别名这一支的兼容性不取决于条数，27 条与
-	// 20 条走的是同一条代码路径。上面那条用仓库底表的 20 条真数据，这条把条数扫一遍，
-	// 两条合起来覆盖「27 条继续可用」这个事实，而不依赖任何本机文件。
+	// 这里再按**条数**构造等价语料把范围扫宽：字符串别名这一支的兼容性不取决于条数，
+	// 27 条与 147 条走的是同一条代码路径。这样即便底表将来再变，这一档仍然守着。
 	for (const count of [1, 20, 27, 147]) {
 		const raw = {};
 		for (let index = 0; index < count; index += 1) raw[`relay-${index}/some-model`] = `target-model-${index}`;
